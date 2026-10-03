@@ -17,6 +17,8 @@ final class BridgeController: ObservableObject {
     @Published private(set) var status = "시작하는 중"
     @Published var clipboardEnabled = true { didSet { persist() } }
     @Published var otpEnabled = true { didSet { persist() } }
+    /// When on, copies that the source app marked as concealed (password managers do) stay on this Mac.
+    @Published var skipSensitive = false { didSet { persist() } }
 
     private struct Clip {
         let text: String
@@ -31,6 +33,7 @@ final class BridgeController: ObservableObject {
     /// A phone races several addresses, so it may briefly hold more than one session.
     private var sessions: [String: [PhoneSession]] = [:]
     private var pendingPsk: Data?
+    private var isLoading = false
     private var pendingExpiry: Task<Void, Never>?
     /// Connections that have not finished the handshake yet, per remote address. One
     /// address cannot take every slot, so a single host cannot lock real phones out.
@@ -53,9 +56,14 @@ final class BridgeController: ObservableObject {
     let macName = Host.current().localizedName ?? "Mac"
 
     func start() {
+        // Assigning a setting saves all of them, so nothing may be saved until every
+        // stored value has been read back.
+        isLoading = true
         phones = state.phones
         clipboardEnabled = state.clipboardEnabled
         otpEnabled = state.otpEnabled
+        skipSensitive = state.skipSensitive ?? false
+        isLoading = false
         otpPresenter.requestPermission()
         PairingStore.writePendingLink(nil)  // left over if the app quit while pairing
         watcher.onCopy = { [weak self] text, sensitive in self?.localCopy(text, sensitive: sensitive) }
@@ -178,7 +186,7 @@ final class BridgeController: ObservableObject {
                 guard established(session, peer) else { throw SessionError.authFailed }
                 peerId = peer.phoneId
                 while true {
-                    handle(try await session.receive(), from: session)
+                    handle(try await session.receive(), from: session, phoneName: peer.name)
                 }
             } catch {
                 timeout.cancel()
@@ -239,7 +247,7 @@ final class BridgeController: ObservableObject {
         return true
     }
 
-    private func handle(_ message: Message, from session: PhoneSession) {
+    private func handle(_ message: Message, from session: PhoneSession, phoneName: String) {
         switch message.t {
         case "clip":
             guard clipboardEnabled, let text = message.text, !text.isEmpty,
@@ -273,6 +281,13 @@ final class BridgeController: ObservableObject {
             Log.app.info("otp from phone")
         case "ping":
             Task { try? await session.send(Message(t: "pong")) }
+        case "test":
+            // "연결 테스트" on the phone: confirm on both screens that phone -> Mac works.
+            // Answer first: drawing the banner would otherwise be counted as network delay.
+            Task {
+                try? await session.send(Message(t: "tested", n: message.n))
+                otpPresenter.announce(title: "폰 연결 테스트", detail: "\(phoneName)에서 보낸 신호를 받았습니다")
+            }
         default:
             break
         }
@@ -281,6 +296,12 @@ final class BridgeController: ObservableObject {
     private func localCopy(_ text: String, sensitive: Bool) {
         guard text != pasteboardText else { return }
         pasteboardText = text
+        if sensitive && skipSensitive {
+            // Kept on this Mac. The older copy must not be delivered later in its place.
+            localClip = nil
+            clipTs = Self.now()
+            return
+        }
         let clip = Clip(text: text, sensitive: sensitive, ts: Self.now())
         localClip = clip
         clipTs = clip.ts
@@ -303,8 +324,10 @@ final class BridgeController: ObservableObject {
     // MARK: Helpers
 
     private func persist() {
+        guard !isLoading else { return }
         state.clipboardEnabled = clipboardEnabled
         state.otpEnabled = otpEnabled
+        state.skipSensitive = skipSensitive
         if phones != state.phones { phones = state.phones }
         PairingStore.save(state)
         refreshStatus()

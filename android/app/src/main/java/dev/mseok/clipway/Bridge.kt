@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.os.PersistableBundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import dev.mseok.clipway.protocol.Clip
@@ -31,6 +32,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.random.Random
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -40,6 +43,9 @@ class BridgeApp : Application() {
     /** A scanned or received pairing link that waits for the user's confirmation. */
     val pendingPairing = MutableStateFlow<PairingRequest?>(null)
 }
+
+/** Result of "연결 테스트" for one Mac; [millis] is the round trip time, or null when it did not answer. */
+data class LinkTest(val name: String, val millis: Long?)
 
 /** [external] is true when the link came from outside the app (another app, a web page, the camera). */
 data class PairingRequest(val mac: PairedMac, val external: Boolean)
@@ -66,6 +72,10 @@ class PairingStore(context: Context) {
     var otpEnabled: Boolean
         get() = prefs.getBoolean("otpEnabled", true)
         set(value) = prefs.edit().putBoolean("otpEnabled", value).apply()
+
+    var skipSensitive: Boolean
+        get() = prefs.getBoolean("skipSensitive", false)
+        set(value) = prefs.edit().putBoolean("skipSensitive", value).apply()
 }
 
 /**
@@ -82,6 +92,8 @@ class Bridge(private val context: Context) {
     val connected = MutableStateFlow<Set<String>>(emptySet())
     val clipboardEnabled = MutableStateFlow(store.clipboardEnabled)
     val otpEnabled = MutableStateFlow(store.otpEnabled)
+    /** When on, copies that the source app marked as sensitive (password managers do) stay on the phone. */
+    val skipSensitive = MutableStateFlow(store.skipSensitive)
 
     private val locator = MacLocator(context)
     private val clipboard = context.getSystemService(ClipboardManager::class.java)
@@ -188,6 +200,11 @@ class Bridge(private val context: Context) {
             }
             val now = System.currentTimeMillis()
             clipTs = now
+            if (!manual && sensitive && skipSensitive.value) {
+                // Kept on the phone. The older copy must not be delivered later in its place.
+                localClip = null
+                return null
+            }
             return Clip(text, sensitive, now).also { localClip = it }
         }
     }
@@ -222,6 +239,14 @@ class Bridge(private val context: Context) {
         runCatching { clipboard.setPrimaryClip(data) }
             .onFailure { Log.w(TAG, "clipboard write failed", it) }
         Log.i(TAG, "clip from Mac: ${text.length} chars")
+    }
+
+    /**
+     * Sends a test message to every paired Mac over the same encrypted connection that
+     * carries copies and codes. A Mac that receives it shows a banner and answers.
+     */
+    suspend fun testLinks(): List<LinkTest> = withContext(Dispatchers.IO) {
+        links.values.map { async { it.test() } }.awaitAll().sortedBy { it.name }
     }
 
     /** Returns true when at least one Mac received the code. */
@@ -264,6 +289,11 @@ class Bridge(private val context: Context) {
         otpEnabled.value = value
     }
 
+    fun setSkipSensitive(value: Boolean) {
+        store.skipSensitive = value
+        skipSensitive.value = value
+    }
+
     private fun persist() {
         val current = links.values.map { it.mac }.sortedBy { it.name }
         store.saveMacs(current)
@@ -280,6 +310,19 @@ class Bridge(private val context: Context) {
         private val mutex = Mutex()
         @Volatile var connection: MacConnection? = null
         @Volatile private var retired = false
+        private val tests = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+
+        suspend fun test(): LinkTest {
+            val opened = runCatching { ensureConnected() }.getOrNull() ?: return LinkTest(mac.name, null)
+            val n = Random.nextLong(Long.MAX_VALUE)
+            val answer = CompletableDeferred<Unit>()
+            tests[n] = answer
+            val started = SystemClock.elapsedRealtime()
+            val answered = runCatching { opened.send(JSONObject().put("t", "test").put("n", n)) }.isSuccess &&
+                withTimeoutOrNull(TEST_TIMEOUT_MS) { answer.await() } != null
+            tests.remove(n)
+            return LinkTest(mac.name, if (answered) SystemClock.elapsedRealtime() - started else null)
+        }
 
         suspend fun ensureConnected(): MacConnection? = mutex.withLock {
             connection ?: connect()?.also { opened ->
@@ -344,12 +387,13 @@ class Bridge(private val context: Context) {
             try {
                 while (true) {
                     val message = opened.receive()
-                    if (message.optString("t") == "clip") {
-                        applyRemoteClip(
+                    when (message.optString("t")) {
+                        "clip" -> applyRemoteClip(
                             message.optString("text"),
                             message.optBoolean("sensitive"),
                             message.optLong("ts"),
                         )
+                        "tested" -> tests.remove(message.optLong("n"))?.complete(Unit)
                     }
                 }
             } catch (e: Exception) {
@@ -394,6 +438,7 @@ class Bridge(private val context: Context) {
         const val TAG = "Clipway"
         const val PING_INTERVAL_MS = 10_000L
         const val IDLE_CLOSE_MS = 60_000L
+        const val TEST_TIMEOUT_MS = 4_000L
         val RETRY_DELAYS_MS = longArrayOf(2_000, 5_000, 15_000, 30_000, 60_000)
     }
 }

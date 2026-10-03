@@ -55,6 +55,8 @@ struct PanelView: View {
             Divider()
             Toggle("클립보드 동기화", isOn: $controller.clipboardEnabled)
             Toggle("인증번호 받기", isOn: $controller.otpEnabled)
+            Toggle("민감한 항목은 보내지 않기", isOn: $controller.skipSensitive)
+                .help("비밀번호 관리자처럼 복사한 내용을 '민감함'으로 표시하는 앱의 복사는 폰으로 보내지 않습니다.")
             Toggle(
                 "로그인 시 실행",
                 isOn: Binding(

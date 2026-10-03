@@ -54,6 +54,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.mseok.clipway.BridgeApp
 import dev.mseok.clipway.BridgeService
 import dev.mseok.clipway.ClipboardWatcher
+import dev.mseok.clipway.LinkTest
 import dev.mseok.clipway.PairingRequest
 import dev.mseok.clipway.protocol.PairedMac
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,6 +67,8 @@ data class Permissions(val notifications: Boolean, val sms: Boolean, val battery
 class MainActivity : ComponentActivity() {
     private val bridge get() = (application as BridgeApp).bridge
     private val permissions = MutableStateFlow(Permissions(false, false, false))
+    private val testResults = MutableStateFlow<List<LinkTest>?>(null)
+    private val testing = MutableStateFlow(false)
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             refreshPermissions()
@@ -148,6 +151,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun testConnection() {
+        if (bridge.macs.value.isEmpty()) return toast("페어링된 Mac이 없습니다")
+        testing.value = true
+        lifecycleScope.launch {
+            testResults.value = bridge.testLinks()
+            testing.value = false
+        }
+    }
+
     private fun openShizuku() {
         val launch = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
             ?: Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$SHIZUKU_PACKAGE"))
@@ -162,8 +174,41 @@ class MainActivity : ComponentActivity() {
         val granted by permissions.collectAsState()
         val clipboardEnabled by bridge.clipboardEnabled.collectAsState()
         val otpEnabled by bridge.otpEnabled.collectAsState()
+        val skipSensitive by bridge.skipSensitive.collectAsState()
         val pendingPairing = (application as BridgeApp).pendingPairing
         val pairing by pendingPairing.collectAsState()
+        val results by testResults.collectAsState()
+        val busy by testing.collectAsState()
+
+        results?.let { list ->
+            AlertDialog(
+                onDismissRequest = { testResults.value = null },
+                title = { Text("연결 테스트") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        list.forEach { result ->
+                            Text(
+                                if (result.millis != null) "✓ ${result.name}: 정상 (왕복 ${result.millis}ms)"
+                                else "✗ ${result.name}: 응답 없음"
+                            )
+                        }
+                        if (list.any { it.millis != null }) {
+                            Text("정상인 Mac의 화면 오른쪽 위에 '폰 연결 테스트' 알림이 떴습니다.")
+                        }
+                        if (list.any { it.millis == null }) {
+                            Text("응답이 없으면 Mac에서 Clipway가 실행 중인지, 같은 Wi-Fi이거나 Tailscale이 켜져 있는지 확인하세요.")
+                        }
+                        Text(
+                            if (watcher == ClipboardWatcher.State.WATCHING) "복사 자동 감지: 켜짐. 폰에서 복사하면 자동으로 전달됩니다."
+                            else "복사 자동 감지: 꺼짐. 복사해도 자동으로 넘어가지 않으니 타일이나 공유 메뉴로 보내세요."
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { testResults.value = null }) { Text("확인") }
+                },
+            )
+        }
 
         pairing?.let { request ->
             val mac = request.mac
@@ -247,6 +292,9 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = ::scanQr) { Text("Mac 추가 (QR 스캔)") }
                     OutlinedButton(onClick = ::sendClipboard) { Text("클립보드 보내기") }
                 }
+                OutlinedButton(onClick = ::testConnection, enabled = !busy) {
+                    Text(if (busy) "테스트하는 중…" else "연결 테스트")
+                }
             }
 
             Section("복사 자동 감지") {
@@ -271,6 +319,12 @@ class MainActivity : ComponentActivity() {
             Section("동기화") {
                 Toggle("클립보드 동기화", clipboardEnabled, bridge::setClipboardEnabled)
                 Toggle("인증번호를 Mac으로 전달", otpEnabled, bridge::setOtpEnabled)
+                Toggle("민감한 항목은 보내지 않기", skipSensitive, bridge::setSkipSensitive)
+                Text(
+                    "비밀번호 관리자처럼 복사한 내용을 '민감함'으로 표시하는 앱의 복사만 걸러집니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Section("권한") {
