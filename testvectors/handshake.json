@@ -4,34 +4,35 @@
   "phonePublic": "eaYx7t4b+cmPEgMs3q3Q56B5OY/HhriMyEbsia+FpRo=",
   "macPrivate": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8=",
   "macPublic": "ST6C/HRGSlkmiBdiPSBTxeuOLMSpiLT+4XnsawENUx0=",
-  "phoneHello": "eyJ2IjoxLCJwaG9uZUlkIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1IiwibWFjSWQiOiJhYWFhYWFhYS1iYmJiLWNjY2MtZGRkZC1lZWVlZWVlZWVlZWUiLCJlcGgiOiJlYVl4N3Q0YitjbVBFZ01zM3EzUTU2QjVPWS9IaHJpTXlFYnNpYStGcFJvPSJ9",
+  "phoneHello": "eyJ2IjoxLCJlcGgiOiJlYVl4N3Q0YitjbVBFZ01zM3EzUTU2QjVPWS9IaHJpTXlFYnNpYStGcFJvPSJ9",
   "macHello": "eyJ2IjoxLCJlcGgiOiJTVDZDL0hSR1Nsa21pQmRpUFNCVHhldU9MTVNwaUxUKzRYbnNhd0VOVXgwPSJ9",
-  "phoneToMacKey": "yHgQL4bUc927T+aPhxrsA9iRmey3cpCoejRO/IgHiSA=",
-  "macToPhoneKey": "u/gNbqIAU9xmOQkgbKFFqcf9qa3stEAUpC/paxv9ARQ=",
+  "phoneToMacKey": "vVievH7HNYpb5rxC5WZuZsDzKTDzngISR92Ych1iBvY=",
+  "macToPhoneKey": "1VZ07+DDjbcmGi69eSq5zYMHGn2Gc17l1lDMfAaB9Vs=",
+  "pairingKey": "aM/uk8Yd2EmHS5J1NK9rh+b3q8g7I7FTzM0oFwA9ezg=",
   "records": [
     {
       "direction": "phoneToMac",
       "counter": 0,
-      "plaintext": "{\"t\":\"hello\",\"name\":\"Android Phone\"}",
-      "sealed": "vDNROGesfF+DOyu5w3/OaosKi/yT83Zns4ZemU2HNg39sJ7NjMdkavOvzc0dXtxU3Q429Q=="
+      "plaintext": "{\"t\":\"hello\",\"id\":\"11111111-2222-3333-4444-555555555555\",\"name\":\"Android Phone\",\"ts\":0}",
+      "sealed": "QHugFodOTKesnb2azi1Db4JetzXlFE0YtFR+W6Ug+MCOf9z9i61+TSMPFIlyfAtjnzNTXIU6KMMM+G3ydqI0hG+QSX19sKJDS1keGyRPvJ5hRETleOvC+i4M0mEcbEUsd2Z0g5avHQ=="
     },
     {
       "direction": "phoneToMac",
       "counter": 1,
       "plaintext": "{\"t\":\"clip\",\"text\":\"안녕하세요 clipboard ✓\",\"sensitive\":false,\"ts\":1791000000000}",
-      "sealed": "Kf3z18lwGOm5VNzPIPRpgzmV9Znd/GXQiN+nbtI9l3v1F35OrSybHpirmgCeZiOxwhgNEWigDL5RgxRNKyb034KO4qCQew1lCcgSWGKTBT7/K8tSQVnCfVkMygdYTjruSbr3j4S/OHo="
+      "sealed": "qTYrrfwOSGYm3MSFhKifW6p6TZkmR7fyBGMh93zw4RPk8maKb41pUm/4rKrZua4M1JKhum+17C7Jx2pruDY8AK9Mh6DZigMs2fJo3sV++twFtEEeUt+17/QFbXCsKZHY0t+Nm1i09WQ="
     },
     {
       "direction": "macToPhone",
       "counter": 0,
       "plaintext": "{\"t\":\"hello\",\"name\":\"Mac mini\"}",
-      "sealed": "WvemnKXi/YSzZ941OMNcWaMUdl2D8oPI6lBW2RqVMecfEiQPAMCOj5SF37ixGA4="
+      "sealed": "t72iWUjJqMq2VNubd2B1GbwdMXr6vOrL1QPL9DKSJXvBmLOv9GiPXDwVdRESemY="
     },
     {
       "direction": "macToPhone",
       "counter": 258,
       "plaintext": "{\"t\":\"pong\"}",
-      "sealed": "Ggdzk6S4nBJ91jdIXIeqjPoZqJH+f1kj9pVFWQ=="
+      "sealed": "bPktJ4KpxK6B6eOryGAgYppa9quNtTozzdcqCA=="
     }
   ]
 }

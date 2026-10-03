@@ -36,7 +36,13 @@ import org.json.JSONObject
 
 class BridgeApp : Application() {
     val bridge: Bridge by lazy { Bridge(this) }
+
+    /** A scanned or received pairing link that waits for the user's confirmation. */
+    val pendingPairing = MutableStateFlow<PairingRequest?>(null)
 }
+
+/** [external] is true when the link came from outside the app (another app, a web page, the camera). */
+data class PairingRequest(val mac: PairedMac, val external: Boolean)
 
 class PairingStore(context: Context) {
     private val prefs = context.getSharedPreferences("bridge", Context.MODE_PRIVATE)
@@ -196,8 +202,10 @@ class Bridge(private val context: Context) {
         delivered > 0
     }
 
-    private fun applyRemoteClip(text: String, sensitive: Boolean, ts: Long) {
+    private fun applyRemoteClip(text: String, sensitive: Boolean, reportedTs: Long) {
         if (!clipboardEnabled.value || text.isEmpty() || text.length > Wire.MAX_CLIP_CHARS) return
+        // A timestamp from the future would block later copies; cap it at now.
+        val ts = reportedTs.coerceAtMost(System.currentTimeMillis())
         synchronized(clipLock) {
             if (ts <= clipTs) return
             clipTs = ts
@@ -229,9 +237,12 @@ class Bridge(private val context: Context) {
 
     // region Pairing and settings
 
-    /** Connects with the key from a freshly scanned QR code; the Mac stores the pairing on success. */
+    /**
+     * Connects once with the key from the QR code. Both sides then keep a key derived
+     * from that handshake, so the QR code cannot be used again by anyone who saw it.
+     */
     suspend fun pair(mac: PairedMac): Boolean = withContext(Dispatchers.IO) {
-        val link = Link(mac)
+        val link = Link(mac, pairing = true)
         link.ensureConnected() ?: return@withContext false
         links.put(mac.id, link)?.retire()
         persist()
@@ -265,7 +276,7 @@ class Bridge(private val context: Context) {
         links.values.map { async { it.ensureConnected() } }.awaitAll()
     }
 
-    private inner class Link(@Volatile var mac: PairedMac) {
+    private inner class Link(@Volatile var mac: PairedMac, @Volatile private var pairing: Boolean = false) {
         private val mutex = Mutex()
         @Volatile var connection: MacConnection? = null
         @Volatile private var retired = false
@@ -290,15 +301,28 @@ class Bridge(private val context: Context) {
             }
         }
 
-        /** Races every known address; the first completed handshake wins. */
         private suspend fun connect(): MacConnection? {
-            val hosts = (listOfNotNull(locator.hostFor(mac.id), mac.lastHost) + mac.hosts).distinct()
+            val hosts = (listOfNotNull(mac.lastHost) + mac.hosts + locator.hosts()).distinct()
             val ts = synchronized(clipLock) { clipTs }
+            if (pairing) {
+                // One address at a time: the QR code's key must be spent on exactly one
+                // handshake, or the two sides could keep keys from different handshakes.
+                for (host in hosts) {
+                    val opened = runCatching {
+                        MacConnection.open(host, mac.port, mac.psk, store.phoneId, phoneName, ts)
+                    }.getOrNull() ?: continue
+                    mac = mac.copy(psk = opened.pairingKey, lastHost = host)
+                    pairing = false
+                    return opened
+                }
+                return null
+            }
+            // Otherwise race every known address; the first completed handshake wins.
             val winner = CompletableDeferred<Pair<String, MacConnection>?>()
             val attempts = hosts.map { host ->
                 scope.launch {
                     val opened = runCatching {
-                        MacConnection.open(host, mac.port, mac.id, mac.psk, store.phoneId, phoneName, ts)
+                        MacConnection.open(host, mac.port, mac.psk, store.phoneId, phoneName, ts)
                     }.getOrNull() ?: return@launch
                     if (!winner.complete(host to opened)) opened.close()
                 }

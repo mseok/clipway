@@ -75,11 +75,20 @@ Pairing by hand, without the QR code:
 ```sh
 pkill -USR1 -x Clipway
 link="$(cat "$HOME/Library/Application Support/Clipway/pending-pairing-link.txt")"
-adb shell "am start -a android.intent.action.VIEW -d '$link' -p dev.mseok.clipway"
+printf "am start -a android.intent.action.VIEW -d '%s' -p dev.mseok.clipway\n" "$link" | adb shell
 ```
 
-The link contains the pairing key: do not print or log it. The file disappears once
-the phone has paired, and after ten minutes otherwise.
+Send the command on stdin as shown, never as an argument: arguments are visible to every
+user of the Mac in the process list.
+
+The phone then shows a dialog asking whether to pair with that Mac. The person has to
+tap "페어링": pairing is never completed without that confirmation, because a pairing
+link can be sent to the phone by any app or web page.
+
+The link contains a one-time pairing key: do not print or log it. The file disappears
+once the phone has paired, and after ten minutes otherwise; the two devices then keep a
+different key that never left them. A link from outside the app cannot replace a Mac
+that is already paired: unpair it on the phone first ("해제").
 
 ## 4. Shizuku (automatic copy detection)
 
@@ -106,7 +115,7 @@ adb logcat -d -s Clipway:V | tail -2          # expect "clip from Mac: 12 chars"
 
 # phone -> Mac (manual path)
 adb shell am start -a android.intent.action.SEND -t text/plain \
-  --es android.intent.extra.TEXT clipway-test-2 -n dev.mseok.clipway/.SendClipboardActivity
+  --es android.intent.extra.TEXT clipway-test-2 -n dev.mseok.clipway/.ShareToMacActivity
 pbpaste                                        # expect clipway-test-2
 ```
 

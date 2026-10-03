@@ -5,6 +5,7 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.Binder
 import android.os.Process
 import android.util.Log
 import androidx.annotation.Keep
@@ -20,9 +21,12 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
     private val manager =
         ShellContext(context).getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     private var listener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    private val ownerUid = context.applicationInfo.uid
 
     @Synchronized
     override fun watch(callback: IClipboardCallback) {
+        // This process can read the clipboard for anyone who reaches it; serve Clipway only.
+        check(Binder.getCallingUid() == ownerUid) { "caller is not Clipway" }
         val manager = checkNotNull(manager) { "no clipboard service" }
         listener?.let(manager::removePrimaryClipChangedListener)
         listener = ClipboardManager.OnPrimaryClipChangedListener {

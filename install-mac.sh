@@ -27,11 +27,12 @@ if [ -n "$LOCAL_ZIP" ]; then
 else
   echo "Clipway를 내려받는 중..."
   curl -fL --progress-bar -o "$TMP/Clipway-mac.zip" "$BASE_URL/Clipway-mac.zip"
-  if curl -fsSL -o "$TMP/SHA256SUMS" "$BASE_URL/SHA256SUMS" 2>/dev/null; then
-    expected="$(grep 'Clipway-mac.zip' "$TMP/SHA256SUMS" | cut -d' ' -f1)"
-    actual="$(shasum -a 256 "$TMP/Clipway-mac.zip" | cut -d' ' -f1)"
-    [ "$expected" = "$actual" ] || fail "내려받은 파일의 체크섬이 다릅니다."
-  fi
+  # The checksum guards against a damaged or incomplete download. It comes from the same
+  # release, so it does not replace trusting the release itself.
+  curl -fsSL -o "$TMP/SHA256SUMS" "$BASE_URL/SHA256SUMS" || fail "체크섬 파일을 내려받지 못했습니다."
+  expected="$(grep 'Clipway-mac.zip' "$TMP/SHA256SUMS" | cut -d' ' -f1)"
+  actual="$(shasum -a 256 "$TMP/Clipway-mac.zip" | cut -d' ' -f1)"
+  [ -n "$expected" ] && [ "$expected" = "$actual" ] || fail "내려받은 파일의 체크섬이 다릅니다."
 fi
 
 ditto -x -k "$TMP/Clipway-mac.zip" "$TMP/unpacked"

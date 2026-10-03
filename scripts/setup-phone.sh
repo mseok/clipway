@@ -34,6 +34,9 @@ if adb shell pm path $SHIZUKU >/dev/null 2>&1; then
   adb shell dumpsys deviceidle whitelist +$SHIZUKU >/dev/null
   if adb shell 'ps -A -o NAME' | grep -q shizuku_server; then
     echo "      already running"
+  elif ! adb shell pm list packages -i $SHIZUKU | grep -q 'installer=com.android.vending'; then
+    # Its starter runs with shell privileges, so only a copy from the Play Store is started here.
+    echo "      installed from outside the Play Store: start it yourself from the Shizuku app"
   else
     # Started from a computer, Shizuku stops at the next reboot. Starting it once from the
     # Shizuku app ("무선 디버깅으로 시작") makes it come back by itself after a reboot.
@@ -54,9 +57,12 @@ if pgrep -x Clipway >/dev/null; then
   pkill -USR1 -x Clipway
   for _ in 1 2 3 4 5; do [ -f "$LINK_FILE" ] && break; sleep 0.5; done
   if [ -f "$LINK_FILE" ]; then
-    adb shell "am start -a android.intent.action.VIEW -d '$(cat "$LINK_FILE")' -p $PKG" >/dev/null 2>&1
-    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$LINK_FILE" ] || break; sleep 1; done
-    [ -f "$LINK_FILE" ] && echo "      the phone did not connect; check that both are on the same Wi-Fi" || echo "      paired"
+    # The link holds the pairing key. It goes to the phone on stdin so that it never shows
+    # up in this Mac's process list; the Mac app only emits unreserved URL characters.
+    printf "am start -a android.intent.action.VIEW -d '%s' -p %s\n" "$(cat "$LINK_FILE")" "$PKG" | adb shell >/dev/null 2>&1
+    echo "      the phone now asks whether to pair: tap \"페어링\" on the phone (waiting up to 60 s)"
+    for _ in $(seq 1 60); do [ -f "$LINK_FILE" ] || break; sleep 1; done
+    [ -f "$LINK_FILE" ] && echo "      not paired: confirm on the phone, and check that both are on the same Wi-Fi" || echo "      paired"
   else
     echo "      the Mac app did not produce a pairing link"
   fi

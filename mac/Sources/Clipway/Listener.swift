@@ -8,7 +8,7 @@ final class BridgeListener {
     private var listener: NWListener?
 
     func start(
-        port: UInt16, macId: String, name: String,
+        port: UInt16, name: String,
         onConnection: @escaping (NWConnection) -> Void,
         onFailure: @escaping (String) -> Void
     ) {
@@ -23,9 +23,9 @@ final class BridgeListener {
 
         do {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!)
-            var txt = NWTXTRecord()
-            txt["id"] = macId
-            listener.service = NWListener.Service(name: name, type: Wire.serviceType, txtRecord: txt)
+            // No identifier is advertised: a phone tries its keys against every Clipway
+            // service it sees, and only the right Mac can answer.
+            listener.service = NWListener.Service(name: name, type: Wire.serviceType)
             listener.newConnectionHandler = onConnection
             listener.stateUpdateHandler = { state in
                 switch state {
@@ -48,6 +48,28 @@ final class BridgeListener {
 }
 
 enum LocalAddresses {
+    /// IPv4 subnets this Mac is attached to, for `PeerFilter`.
+    static func subnets() -> [PeerFilter.Subnet] {
+        var result: [PeerFilter.Subnet] = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0 else { return [] }
+        defer { freeifaddrs(head) }
+        var cursor = head
+        while let entry = cursor {
+            defer { cursor = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr, let mask = entry.pointee.ifa_netmask,
+                address.pointee.sa_family == UInt8(AF_INET)
+            else { continue }
+            let value: (UnsafeMutablePointer<sockaddr>) -> UInt32 = { pointer in
+                pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+                }
+            }
+            result.append(PeerFilter.Subnet(address: value(address), mask: value(mask)))
+        }
+        return result
+    }
+
     /// IPv4 addresses a phone could reach: LAN interfaces and the Tailscale range.
     static func reachable() -> [String] {
         var result: [String] = []

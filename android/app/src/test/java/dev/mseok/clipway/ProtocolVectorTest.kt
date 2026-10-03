@@ -29,6 +29,7 @@ class ProtocolVectorTest {
         for (keys in listOf(phoneSide, macSide)) {
             assertArrayEquals(bytes("phoneToMacKey"), keys.phoneToMac)
             assertArrayEquals(bytes("macToPhoneKey"), keys.macToPhone)
+            assertArrayEquals(bytes("pairingKey"), keys.pairingKey)
         }
     }
 
@@ -85,5 +86,36 @@ class ProtocolVectorTest {
         assertNull(PairedMac.fromPairingLink("https://example.com/?v=1"))
         assertNull(PairedMac.fromPairingLink(link.replace("v=1", "v=2")))
         assertNull(PairedMac.fromPairingLink(link.replace(encoded, "AAAA")))
+    }
+
+    @Test
+    fun pairingLinkCannotPointAtTheInternet() {
+        val psk = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 7 })
+        fun link(hosts: String, port: String = "47823", name: String = "Mac", id: String = "id-1") =
+            "clipway://pair?v=1&id=$id&name=$name&psk=$psk&port=$port&hosts=$hosts"
+
+        // Public addresses and host names are dropped; private ones stay.
+        val mixed = PairedMac.fromPairingLink(link("203.0.113.7,evil.example.com,192.168.0.2,100.64.0.10,10.0.0.5"))!!
+        assertEquals(listOf("192.168.0.2", "100.64.0.10", "10.0.0.5"), mixed.hosts)
+        assertEquals(emptyList<String>(), PairedMac.fromPairingLink(link("8.8.8.8"))!!.hosts)
+
+        for (host in listOf("192.168.0.2", "10.1.2.3", "172.16.0.1", "172.31.255.255", "100.64.0.1", "100.127.9.9", "169.254.1.1")) {
+            assertEquals(host, true, PairedMac.isPrivateIpv4(host))
+        }
+        for (host in listOf("8.8.8.8", "172.32.0.1", "100.128.0.1", "192.169.0.1", "1.2.3", "1.2.3.4.5", "256.1.1.1",
+            "192.168.0.2:80", "0x7f.0.0.1", "192.168.0.2 ", "", "localhost", "::1", "１９２.168.0.2")) {
+            assertEquals(host, false, PairedMac.isPrivateIpv4(host))
+        }
+
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", port = "0")))
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", port = "70000")))
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", port = "22;x")))
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", id = "")))
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", id = "a".repeat(65))))
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2", name = "%0A%0D")))
+        assertEquals(64, PairedMac.fromPairingLink(link("192.168.0.2", name = "M".repeat(300)))!!.name.length)
+        assertEquals("EvilMac", PairedMac.fromPairingLink(link("192.168.0.2", name = "Evil%0AMac"))!!.name)
+        assertEquals(8, PairedMac.fromPairingLink(link((1..20).joinToString(",") { "10.0.0.$it" }))!!.hosts.size)
+        assertNull(PairedMac.fromPairingLink(link("192.168.0.2") + "&x=" + "a".repeat(3000)))
     }
 }

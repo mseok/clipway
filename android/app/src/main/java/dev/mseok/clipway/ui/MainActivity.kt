@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +54,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.mseok.clipway.BridgeApp
 import dev.mseok.clipway.BridgeService
 import dev.mseok.clipway.ClipboardWatcher
+import dev.mseok.clipway.PairingRequest
 import dev.mseok.clipway.protocol.PairedMac
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -74,8 +76,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         BridgeService.start(this)
-        // Folding the phone recreates the activity with the same intent; pair only once.
-        if (savedInstanceState == null) intent?.dataString?.let(::pair)
+        // Folding the phone recreates the activity with the same intent; handle it only once.
+        if (savedInstanceState == null) intent?.dataString?.let { requestPairing(it, external = true) }
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)) {
@@ -86,7 +88,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.dataString?.let(::pair)
+        intent.dataString?.let { requestPairing(it, external = true) }
     }
 
     override fun onResume() {
@@ -116,12 +118,20 @@ class MainActivity : ComponentActivity() {
     private fun scanQr() {
         val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
         GmsBarcodeScanning.getClient(this, options).startScan()
-            .addOnSuccessListener { it.rawValue?.let(::pair) }
+            .addOnSuccessListener { code -> code.rawValue?.let { requestPairing(it, external = false) } }
             .addOnFailureListener { toast("스캐너를 준비하는 중입니다. 잠시 후 다시 시도하거나 기본 카메라로 QR을 스캔해 주세요") }
     }
 
-    private fun pair(link: String) {
+    /**
+     * Pairing hands this phone's clipboard and verification codes to the other side, and a
+     * link can come from any app or web page. Nothing is paired until the user confirms.
+     */
+    private fun requestPairing(link: String, external: Boolean) {
         val mac = PairedMac.fromPairingLink(link) ?: return toast("Clipway QR이 아닙니다")
+        (application as BridgeApp).pendingPairing.value = PairingRequest(mac, external)
+    }
+
+    private fun pair(mac: PairedMac) {
         toast("${mac.name}에 연결하는 중")
         lifecycleScope.launch {
             val paired = bridge.pair(mac)
@@ -152,6 +162,59 @@ class MainActivity : ComponentActivity() {
         val granted by permissions.collectAsState()
         val clipboardEnabled by bridge.clipboardEnabled.collectAsState()
         val otpEnabled by bridge.otpEnabled.collectAsState()
+        val pendingPairing = (application as BridgeApp).pendingPairing
+        val pairing by pendingPairing.collectAsState()
+
+        pairing?.let { request ->
+            val mac = request.mac
+            // The name and id in a link are whatever its author wrote. A link from outside
+            // the app may add a Mac but never take the place of one that is already paired.
+            val replaces = macs.any { it.id == mac.id || it.name == mac.name }
+            val blocked = request.external && replaces
+            AlertDialog(
+                onDismissRequest = { pendingPairing.value = null },
+                title = { Text(if (blocked) "페어링할 수 없습니다" else "이 Mac과 페어링할까요?") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(mac.name, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (mac.hosts.isEmpty()) "주소: 같은 Wi-Fi에서 자동으로 찾습니다"
+                            else "주소: " + mac.hosts.joinToString(", "),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (request.external) {
+                            Text("이 요청은 Clipway 밖(다른 앱, 웹 페이지, 카메라)에서 들어왔습니다.")
+                        }
+                        if (blocked) {
+                            Text(
+                                "같은 이름이나 ID의 Mac이 이미 페어링되어 있습니다. 바꾸려면 먼저 목록에서 " +
+                                    "'해제'한 뒤 이 앱의 'Mac 추가 (QR 스캔)'으로 다시 페어링하세요."
+                            )
+                        } else {
+                            if (replaces) Text("이미 페어링된 Mac입니다. 계속하면 연결 정보가 새것으로 바뀝니다.")
+                            Text(
+                                "페어링하면 이 폰의 클립보드와 문자 인증번호가 이 Mac으로 전달됩니다. " +
+                                    "내 Mac 화면에 방금 띄운 QR이 아니라면 취소하세요. " +
+                                    "페어링되면 Mac 화면에도 알림이 뜹니다."
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    if (blocked) {
+                        TextButton(onClick = { pendingPairing.value = null }) { Text("닫기") }
+                    } else {
+                        Button(onClick = {
+                            pendingPairing.value = null
+                            pair(mac)
+                        }) { Text("페어링") }
+                    }
+                },
+                dismissButton = {
+                    if (!blocked) TextButton(onClick = { pendingPairing.value = null }) { Text("취소") }
+                },
+            )
+        }
 
         Column(
             Modifier
