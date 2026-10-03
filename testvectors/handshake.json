@@ -1,0 +1,37 @@
+{
+  "psk": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8=",
+  "phonePrivate": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+  "phonePublic": "eaYx7t4b+cmPEgMs3q3Q56B5OY/HhriMyEbsia+FpRo=",
+  "macPrivate": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8=",
+  "macPublic": "ST6C/HRGSlkmiBdiPSBTxeuOLMSpiLT+4XnsawENUx0=",
+  "phoneHello": "eyJ2IjoxLCJwaG9uZUlkIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1IiwibWFjSWQiOiJhYWFhYWFhYS1iYmJiLWNjY2MtZGRkZC1lZWVlZWVlZWVlZWUiLCJlcGgiOiJlYVl4N3Q0YitjbVBFZ01zM3EzUTU2QjVPWS9IaHJpTXlFYnNpYStGcFJvPSJ9",
+  "macHello": "eyJ2IjoxLCJlcGgiOiJTVDZDL0hSR1Nsa21pQmRpUFNCVHhldU9MTVNwaUxUKzRYbnNhd0VOVXgwPSJ9",
+  "phoneToMacKey": "yHgQL4bUc927T+aPhxrsA9iRmey3cpCoejRO/IgHiSA=",
+  "macToPhoneKey": "u/gNbqIAU9xmOQkgbKFFqcf9qa3stEAUpC/paxv9ARQ=",
+  "records": [
+    {
+      "direction": "phoneToMac",
+      "counter": 0,
+      "plaintext": "{\"t\":\"hello\",\"name\":\"Android Phone\"}",
+      "sealed": "vDNROGesfF+DOyu5w3/OaosKi/yT83Zns4ZemU2HNg39sJ7NjMdkavOvzc0dXtxU3Q429Q=="
+    },
+    {
+      "direction": "phoneToMac",
+      "counter": 1,
+      "plaintext": "{\"t\":\"clip\",\"text\":\"안녕하세요 clipboard ✓\",\"sensitive\":false,\"ts\":1791000000000}",
+      "sealed": "Kf3z18lwGOm5VNzPIPRpgzmV9Znd/GXQiN+nbtI9l3v1F35OrSybHpirmgCeZiOxwhgNEWigDL5RgxRNKyb034KO4qCQew1lCcgSWGKTBT7/K8tSQVnCfVkMygdYTjruSbr3j4S/OHo="
+    },
+    {
+      "direction": "macToPhone",
+      "counter": 0,
+      "plaintext": "{\"t\":\"hello\",\"name\":\"Mac mini\"}",
+      "sealed": "WvemnKXi/YSzZ941OMNcWaMUdl2D8oPI6lBW2RqVMecfEiQPAMCOj5SF37ixGA4="
+    },
+    {
+      "direction": "macToPhone",
+      "counter": 258,
+      "plaintext": "{\"t\":\"pong\"}",
+      "sealed": "Ggdzk6S4nBJ91jdIXIeqjPoZqJH+f1kj9pVFWQ=="
+    }
+  ]
+}

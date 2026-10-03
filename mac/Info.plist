@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Clipway</string>
+	<key>CFBundleDisplayName</key>
+	<string>Clipway</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.mseok.clipway</string>
+	<key>CFBundleExecutable</key>
+	<string>Clipway</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>ko</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>같은 네트워크의 Android 폰이 이 Mac을 찾아 클립보드와 인증번호를 주고받을 수 있게 합니다.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_clipway._tcp</string>
+	</array>
+</dict>
+</plist>

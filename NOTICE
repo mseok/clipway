@@ -1,0 +1,12 @@
+Clipway
+
+This product includes software derived from scrcpy
+(https://github.com/Genymobile/scrcpy), Copyright (C) 2018 Genymobile and
+Copyright (C) 2018-2026 Romain Vimont, licensed under the Apache License 2.0.
+The class ShellContext in
+android/app/src/main/java/dev/mseok/clipway/ClipboardWatcherService.kt is a
+Kotlin port of scrcpy's FakeContext.
+
+The Android app uses the Shizuku API (https://github.com/RikkaApps/Shizuku-API),
+licensed under the MIT License, and requires the Shizuku app to be installed
+separately.

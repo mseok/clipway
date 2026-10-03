@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Clipway</string>
+    <string name="send_to_mac">Mac으로 보내기</string>
+</resources>

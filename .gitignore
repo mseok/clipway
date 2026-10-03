@@ -1,0 +1,23 @@
+.toolchain/
+.DS_Store
+
+# mac
+mac/.build/
+mac/dist/
+
+# android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/*.jks
+android/keystore.properties
+
+# python
+__pycache__/
+
+# release files
+/dist/
+
+# local task handoff (not part of the project)
+/task-state.json
