@@ -10,10 +10,13 @@ import android.os.PersistableBundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import androidx.core.content.FileProvider
 import dev.mseok.clipway.protocol.Clip
 import dev.mseok.clipway.protocol.MacConnection
 import dev.mseok.clipway.protocol.PairedMac
 import dev.mseok.clipway.protocol.Wire
+import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
@@ -86,7 +89,7 @@ class PairingStore(context: Context) {
 class Bridge(private val context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val store = PairingStore(context)
-    val watcher = ClipboardWatcher(context) { text, sensitive -> onLocalCopy(text, sensitive) }
+    val watcher = ClipboardWatcher(context, ::onLocalCopy, ::onLocalImage)
 
     val macs = MutableStateFlow(store.macs())
     val connected = MutableStateFlow<Set<String>>(emptySet())
@@ -112,6 +115,8 @@ class Bridge(private val context: Context) {
      * events per copy, or from another sync tool rewriting the same text.
      */
     private var clipboardText: String? = null
+    /** SHA-256 of the picture the clipboard is known to hold, for the same purpose. */
+    private var clipboardImage: String? = null
 
     @Volatile private var interactive = false
     private var retryJob: Job? = null
@@ -197,6 +202,7 @@ class Bridge(private val context: Context) {
             if (!manual) {
                 if (text == clipboardText) return null
                 clipboardText = text
+                clipboardImage = null
             }
             val now = System.currentTimeMillis()
             clipTs = now
@@ -215,9 +221,51 @@ class Bridge(private val context: Context) {
                 runCatching { link.ensureConnected()?.sendClip(clip) != null }.getOrDefault(false)
             }
         }.awaitAll().count { it }
-        Log.i(TAG, "local copy: ${clip.text.length} chars -> $delivered of ${links.size} Mac(s)")
+        val what = clip.image?.let { "image ${it.bytes.size} bytes" } ?: "${clip.text.length} chars"
+        Log.i(TAG, "local copy: $what -> $delivered of ${links.size} Mac(s)")
         delivered > 0
     }
+
+    /** A picture was copied on this phone (reported by the Shizuku watcher). */
+    fun onLocalImage(mime: String, bytes: ByteArray) {
+        val clip: Clip
+        synchronized(clipLock) {
+            val digest = sha256(bytes)
+            if (digest == clipboardImage) return
+            clipboardImage = digest
+            clipboardText = null
+            val now = System.currentTimeMillis()
+            clipTs = now
+            clip = Clip("", false, now, Clip.Image(mime, bytes)).also { localClip = it }
+        }
+        if (clipboardEnabled.value) scope.launch { sendToAll(clip) }
+    }
+
+    private fun applyRemoteImage(image: Clip.Image, reportedTs: Long) {
+        if (!clipboardEnabled.value) return
+        val ts = reportedTs.coerceAtMost(System.currentTimeMillis())
+        synchronized(clipLock) {
+            if (ts <= clipTs) return
+            clipTs = ts
+            val digest = sha256(image.bytes)
+            if (digest == clipboardImage) return
+            clipboardImage = digest
+            clipboardText = null
+        }
+        runCatching {
+            // One file at a time; other apps reach it only through the clipboard.
+            val directory = File(context.cacheDir, "clips").apply { mkdirs() }
+            directory.listFiles()?.forEach { it.delete() }
+            val file = File(directory, "clip-$ts.${Wire.IMAGE_TYPES.getValue(image.mime)}")
+            file.writeBytes(image.bytes)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.clips", file)
+            clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Clipway", uri))
+        }.onFailure { Log.w(TAG, "image write failed", it) }
+        Log.i(TAG, "image from Mac: ${image.bytes.size} bytes")
+    }
+
+    private fun sha256(bytes: ByteArray) =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun applyRemoteClip(text: String, sensitive: Boolean, reportedTs: Long) {
         if (!clipboardEnabled.value || text.isEmpty() || text.length > Wire.MAX_CLIP_CHARS) return
@@ -229,6 +277,7 @@ class Bridge(private val context: Context) {
             // Already there (another sync tool delivered it first): nothing to write.
             if (text == clipboardText) return
             clipboardText = text
+            clipboardImage = null
         }
         val data = ClipData.newPlainText("Clipway", text)
         if (sensitive) {
@@ -391,7 +440,11 @@ class Bridge(private val context: Context) {
                         "clip" -> applyRemoteClip(
                             message.optString("text"),
                             message.optBoolean("sensitive"),
-                            message.optLong("ts"),
+                            message.optLong("ts") + opened.clockOffset,
+                        )
+                        "image" -> applyRemoteImage(
+                            opened.receiveImage(message),
+                            message.optLong("ts") + opened.clockOffset,
                         )
                         "tested" -> tests.remove(message.optLong("n"))?.complete(Unit)
                     }

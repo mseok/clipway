@@ -13,11 +13,16 @@ Protocol v1
 
 The plaintext hellos name neither device. The phone's first record is
 {"t":"hello","id":<phone id>,"name":..,"ts":..}; the Mac finds the pairing by trying its
-stored keys on that record, then answers {"t":"hello","name":..,"ts":..}.
+stored keys on that record, then answers {"t":"hello","name":..,"ts":..,"now":..}.
+Both hellos carry "now", the sender's clock in ms; each side adds (own now - peer now)
+to every timestamp it receives, because "newest copy wins" compares across two clocks.
 
 Pairing: the QR code carries a one-time psk. When a handshake is authenticated with
 it, both sides store pairingKey as the long-term psk for that phone and forget the QR
 key, so a copy of the QR code is worthless afterwards.
+
+Pictures: image {mime, size, ts}, either way, is followed by raw records (the picture's
+bytes, 256 KiB of plaintext each) until size bytes have arrived; size is at most 20 MiB.
 
 Records: clip {text, sensitive, ts} both ways; otp {code, sender} and ping from the
 phone, pong from the Mac; test {n} from the phone is answered with tested {n} and shown

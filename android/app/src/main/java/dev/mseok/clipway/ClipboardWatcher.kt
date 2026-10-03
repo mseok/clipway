@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
+import dev.mseok.clipway.protocol.Wire
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import rikka.shizuku.Shizuku
@@ -13,6 +15,7 @@ import rikka.shizuku.Shizuku
 class ClipboardWatcher(
     private val context: Context,
     private val onCopy: (text: String, sensitive: Boolean) -> Unit,
+    private val onImage: (mime: String, bytes: ByteArray) -> Unit,
 ) {
     enum class State { NOT_RUNNING, NO_PERMISSION, STARTING, WATCHING, FAILED }
 
@@ -29,6 +32,16 @@ class ClipboardWatcher(
     private val callback = object : IClipboardCallback.Stub() {
         override fun onClipboardChanged(text: String?, sensitive: Boolean) {
             if (text != null) onCopy(text, sensitive)
+        }
+
+        override fun onImageCopied(data: ParcelFileDescriptor?, mime: String?, size: Int) {
+            if (data == null) return
+            val bytes = runCatching {
+                ParcelFileDescriptor.AutoCloseInputStream(data).use { it.readNBytes(size.coerceIn(0, Wire.MAX_IMAGE_BYTES)) }
+            }.getOrNull() ?: return
+            if (mime != null && mime in Wire.IMAGE_TYPES && size in 1..Wire.MAX_IMAGE_BYTES && bytes.size == size) {
+                onImage(mime, bytes)
+            }
         }
     }
 
