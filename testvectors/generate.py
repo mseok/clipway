@@ -4,12 +4,20 @@ Run: uv run --with cryptography python testvectors/generate.py
 
 Protocol v1
   frame      = 4-byte big-endian length || payload
-  phoneHello = JSON {"v":1,"phoneId":..,"macId":..,"eph":b64(X25519 pub)}   (plaintext)
-  macHello   = JSON {"v":1,"eph":b64(X25519 pub)}                            (plaintext)
+  phoneHello = JSON {"v":1,"eph":b64(X25519 pub)}   (plaintext, at most 1024 bytes)
+  macHello   = JSON {"v":1,"eph":b64(X25519 pub)}   (plaintext, at most 1024 bytes)
   okm        = HKDF-SHA256(ikm = X25519 shared secret, salt = psk,
-                           info = "clipway-v1" || SHA256(phoneHello || macHello), L = 64)
-  phoneToMac = okm[0:32], macToPhone = okm[32:64]
+                           info = "clipway-v1" || SHA256(phoneHello || macHello), L = 96)
+  phoneToMac = okm[0:32], macToPhone = okm[32:64], pairingKey = okm[64:96]
   record     = AES-256-GCM(key, nonce = 00000000 || counter_be64, aad = "") -> ciphertext || tag
+
+The plaintext hellos name neither device. The phone's first record is
+{"t":"hello","id":<phone id>,"name":..,"ts":..}; the Mac finds the pairing by trying its
+stored keys on that record, then answers {"t":"hello","name":..,"ts":..}.
+
+Pairing: the QR code carries a one-time psk. When a handshake is authenticated with
+it, both sides store pairingKey as the long-term psk for that phone and forget the QR
+key, so a copy of the QR code is worthless afterwards.
 """
 
 import base64
@@ -46,13 +54,7 @@ phone_private = X25519PrivateKey.from_private_bytes(phone_private_raw)
 mac_private = X25519PrivateKey.from_private_bytes(mac_private_raw)
 
 phone_hello = json.dumps(
-    {
-        "v": 1,
-        "phoneId": "11111111-2222-3333-4444-555555555555",
-        "macId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "eph": b64(raw_public(phone_private)),
-    },
-    separators=(",", ":"),
+    {"v": 1, "eph": b64(raw_public(phone_private))}, separators=(",", ":")
 ).encode()
 mac_hello = json.dumps(
     {"v": 1, "eph": b64(raw_public(mac_private))}, separators=(",", ":")
@@ -60,12 +62,12 @@ mac_hello = json.dumps(
 
 shared = phone_private.exchange(mac_private.public_key())
 transcript = hashlib.sha256(phone_hello + mac_hello).digest()
-okm = HKDF(algorithm=hashes.SHA256(), length=64, salt=psk, info=INFO + transcript).derive(shared)
-phone_to_mac, mac_to_phone = okm[:32], okm[32:]
+okm = HKDF(algorithm=hashes.SHA256(), length=96, salt=psk, info=INFO + transcript).derive(shared)
+phone_to_mac, mac_to_phone, pairing_key = okm[:32], okm[32:64], okm[64:]
 
 records = []
 for direction, key, counter, plaintext in [
-    ("phoneToMac", phone_to_mac, 0, '{"t":"hello","name":"Android Phone"}'),
+    ("phoneToMac", phone_to_mac, 0, '{"t":"hello","id":"11111111-2222-3333-4444-555555555555","name":"Android Phone","ts":0}'),
     ("phoneToMac", phone_to_mac, 1, '{"t":"clip","text":"안녕하세요 clipboard ✓","sensitive":false,"ts":1791000000000}'),
     ("macToPhone", mac_to_phone, 0, '{"t":"hello","name":"Mac mini"}'),
     ("macToPhone", mac_to_phone, 258, '{"t":"pong"}'),
@@ -85,6 +87,7 @@ vectors = {
     "macHello": b64(mac_hello),
     "phoneToMacKey": b64(phone_to_mac),
     "macToPhoneKey": b64(mac_to_phone),
+    "pairingKey": b64(pairing_key),
     "records": records,
 }
 

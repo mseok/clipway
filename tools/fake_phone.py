@@ -1,6 +1,6 @@
 """Stand-in for the Android app, used to exercise the Mac app over a real socket.
 
-Run: uv run --with cryptography python tools/fake_phone.py --psk <b64> --mac-id <id> <actions...>
+Run: uv run --with cryptography python tools/fake_phone.py --psk <b64> <actions...>
 
 Actions run in order on one connection:
   clip:<text>     send a clipboard text
@@ -28,6 +28,7 @@ class Channel:
     def __init__(self, sock: socket.socket):
         self.sock = sock
         self.send_key = self.recv_key = None
+        self.pairing_key = None  # the psk to use from now on if this handshake was a pairing
         self.send_counter = self.recv_counter = 0
 
     def read_exactly(self, count: int) -> bytes:
@@ -62,25 +63,24 @@ class Channel:
         return json.loads(plaintext)
 
 
-def connect(host: str, port: int, psk: bytes, mac_id: str, phone_id: str, clip_ts: int) -> Channel:
+def connect(host: str, port: int, psk: bytes, phone_id: str, clip_ts: int) -> Channel:
     channel = Channel(socket.create_connection((host, port), timeout=5))
     ephemeral = X25519PrivateKey.generate()
     public = ephemeral.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
     phone_hello = json.dumps(
-        {"v": 1, "phoneId": phone_id, "macId": mac_id, "eph": base64.b64encode(public).decode()},
-        separators=(",", ":"),
+        {"v": 1, "eph": base64.b64encode(public).decode()}, separators=(",", ":")
     ).encode()
     channel.write_frame(phone_hello)
     mac_hello = channel.read_frame()
     mac_public = X25519PublicKey.from_public_bytes(base64.b64decode(json.loads(mac_hello)["eph"]))
     transcript = hashlib.sha256(phone_hello + mac_hello).digest()
-    okm = HKDF(algorithm=hashes.SHA256(), length=64, salt=psk, info=INFO + transcript).derive(
+    okm = HKDF(algorithm=hashes.SHA256(), length=96, salt=psk, info=INFO + transcript).derive(
         ephemeral.exchange(mac_public)
     )
-    channel.send_key, channel.recv_key = okm[:32], okm[32:]
-    channel.send({"t": "hello", "name": "Fake Phone", "ts": clip_ts})
+    channel.send_key, channel.recv_key, channel.pairing_key = okm[:32], okm[32:64], okm[64:]
+    channel.send({"t": "hello", "id": phone_id, "name": "Fake Phone", "ts": clip_ts})
     print("mac:", channel.receive())
     return channel
 
@@ -90,15 +90,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=47823)
     parser.add_argument("--psk", required=True, help="base64 pairing key")
-    parser.add_argument("--mac-id", required=True)
     parser.add_argument("--phone-id", default="fake-phone")
     parser.add_argument("--clip-ts", type=int, default=0, help="ts reported in hello")
     parser.add_argument("actions", nargs="*")
     args = parser.parse_args()
 
-    channel = connect(
-        args.host, args.port, base64.b64decode(args.psk), args.mac_id, args.phone_id, args.clip_ts
-    )
+    channel = connect(args.host, args.port, base64.b64decode(args.psk), args.phone_id, args.clip_ts)
     for action in args.actions:
         kind, _, value = action.partition(":")
         if kind == "clip":

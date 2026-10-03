@@ -8,6 +8,9 @@ public enum BridgeError: Error {
 public struct SessionKeys {
     public let phoneToMac: SymmetricKey
     public let macToPhone: SymmetricKey
+    /// Long-term key both sides store after a pairing handshake, replacing the key from
+    /// the QR code. A photographed QR code is therefore useless once pairing is done.
+    public let pairingKey: Data
 }
 
 public enum BridgeCrypto {
@@ -28,11 +31,12 @@ public enum BridgeCrypto {
         hash.update(data: macHello)
         let transcript = Data(hash.finalize())
         let okm = shared.hkdfDerivedSymmetricKey(
-            using: SHA256.self, salt: psk, sharedInfo: info + transcript, outputByteCount: 64)
+            using: SHA256.self, salt: psk, sharedInfo: info + transcript, outputByteCount: 96)
         let bytes = okm.withUnsafeBytes { Data($0) }
         return SessionKeys(
-            phoneToMac: SymmetricKey(data: bytes.prefix(32)),
-            macToPhone: SymmetricKey(data: bytes.suffix(32)))
+            phoneToMac: SymmetricKey(data: bytes[0..<32]),
+            macToPhone: SymmetricKey(data: bytes[32..<64]),
+            pairingKey: Data(bytes[64..<96]))
     }
 }
 

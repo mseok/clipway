@@ -36,9 +36,14 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    private func showBanner(title: String, detail: String) {
+    /// Banner for events the user should notice even without Notification Center access.
+    func announce(title: String, detail: String) {
+        showBanner(title: title, detail: detail, symbol: "iphone.badge.checkmark")
+    }
+
+    private func showBanner(title: String, detail: String, symbol: String = "key.fill") {
         panel?.close()
-        let view = NSHostingView(rootView: BannerView(title: title, detail: detail))
+        let view = NSHostingView(rootView: BannerView(title: title, detail: detail, symbol: symbol))
         let size = view.fittingSize
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
@@ -57,7 +62,7 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
         NSSound(named: "Glass")?.play()
         self.panel = panel
         Log.app.info(
-            "verification code banner: visible=\(panel.isVisible) frame=\(NSStringFromRect(panel.frame), privacy: .public)")
+            "banner shown: visible=\(panel.isVisible) frame=\(NSStringFromRect(panel.frame), privacy: .public)")
 
         dismissal?.cancel()
         dismissal = Task {
@@ -77,10 +82,11 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
 private struct BannerView: View {
     let title: String
     let detail: String
+    let symbol: String
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "key.fill").font(.title2).foregroundStyle(.secondary)
+            Image(systemName: symbol).font(.title2).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.title3.weight(.semibold).monospacedDigit())
                 Text(detail).font(.callout).foregroundStyle(.secondary)

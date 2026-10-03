@@ -25,7 +25,11 @@ object BridgeCrypto {
 
     class KeyPair(val private: PrivateKey, val publicRaw: ByteArray)
 
-    class SessionKeys(val phoneToMac: ByteArray, val macToPhone: ByteArray)
+    /**
+     * [pairingKey] is the long-term key both sides store after a pairing handshake, in
+     * place of the key from the QR code.
+     */
+    class SessionKeys(val phoneToMac: ByteArray, val macToPhone: ByteArray, val pairingKey: ByteArray)
 
     fun generateKeyPair(): KeyPair {
         val pair = xdh { KeyPairGenerator.getInstance(it) }.generateKeyPair()
@@ -58,8 +62,8 @@ object BridgeCrypto {
             update(phoneHello)
             digest(macHello)
         }
-        val okm = hkdf(ikm = shared, salt = psk, info = INFO + transcript, length = 64)
-        return SessionKeys(okm.copyOfRange(0, 32), okm.copyOfRange(32, 64))
+        val okm = hkdf(ikm = shared, salt = psk, info = INFO + transcript, length = 96)
+        return SessionKeys(okm.copyOfRange(0, 32), okm.copyOfRange(32, 64), okm.copyOfRange(64, 96))
     }
 
     fun hkdf(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {

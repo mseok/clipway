@@ -14,6 +14,10 @@ object Wire {
     const val SERVICE_TYPE = "_clipway._tcp"
     const val MAX_FRAME = 2 * 1024 * 1024
 
+    /** Limit for the frames exchanged before the other side has proved it holds the pairing key. */
+    const val MAX_HANDSHAKE_FRAME = 1024
+    const val MAX_NAME_LENGTH = 64
+
     /** Text longer than this is not synced; it also keeps binder transactions small. */
     const val MAX_CLIP_CHARS = 200_000
 
@@ -29,9 +33,9 @@ object Wire {
         out.flush()
     }
 
-    fun readFrame(input: DataInputStream): ByteArray {
+    fun readFrame(input: DataInputStream, limit: Int = MAX_FRAME): ByteArray {
         val size = input.readInt()
-        if (size <= 0 || size > MAX_FRAME) throw IOException("bad frame length $size")
+        if (size <= 0 || size > limit) throw IOException("bad frame length $size")
         return ByteArray(size).also(input::readFully)
     }
 }
@@ -46,6 +50,8 @@ class MacConnection private constructor(
     private val recvCipher: FrameCipher,
     /** When the Mac's current pasteboard content was copied (0 if unknown). */
     val macClipTs: Long,
+    /** The key to store instead of the QR code's key when this handshake was a pairing. */
+    val pairingKey: ByteArray,
 ) {
     private val output = socket.getOutputStream()
     private var lastSentClipTs = 0L
@@ -99,7 +105,6 @@ class MacConnection private constructor(
         fun open(
             host: String,
             port: Int,
-            macId: String,
             psk: ByteArray,
             phoneId: String,
             phoneName: String,
@@ -115,28 +120,35 @@ class MacConnection private constructor(
                 val output = socket.getOutputStream()
 
                 val ephemeral = BridgeCrypto.generateKeyPair()
+                // The plaintext hello names neither device: this phone also dials addresses that
+                // may belong to someone else's network, and must not be trackable there.
                 val phoneHello = JSONObject()
                     .put("v", Wire.VERSION)
-                    .put("phoneId", phoneId)
-                    .put("macId", macId)
                     .put("eph", Base64.getEncoder().encodeToString(ephemeral.publicRaw))
                     .toString().toByteArray()
                 Wire.writeFrame(output, phoneHello)
 
-                val macHello = Wire.readFrame(input)
+                val macHello = Wire.readFrame(input, Wire.MAX_HANDSHAKE_FRAME)
                 val macPublic = Base64.getDecoder().decode(JSONObject(String(macHello)).getString("eph"))
                 val keys = BridgeCrypto.deriveKeys(psk, ephemeral.private, macPublic, phoneHello, macHello)
                 val sendCipher = FrameCipher(keys.phoneToMac)
                 val recvCipher = FrameCipher(keys.macToPhone)
 
-                val hello = JSONObject().put("t", "hello").put("name", phoneName).put("ts", clipTs)
+                val hello = JSONObject()
+                    .put("t", "hello")
+                    .put("id", phoneId)
+                    .put("name", phoneName.take(Wire.MAX_NAME_LENGTH))
+                    .put("ts", clipTs)
                 Wire.writeFrame(output, sendCipher.seal(hello.toString().toByteArray()))
                 // A Mac that does not hold the pairing key closes here instead of answering.
-                val reply = JSONObject(String(recvCipher.open(Wire.readFrame(input))))
+                val reply = JSONObject(
+                    String(recvCipher.open(Wire.readFrame(input, Wire.MAX_HANDSHAKE_FRAME)))
+                )
                 if (reply.optString("t") != "hello") throw IOException("unexpected reply")
 
                 socket.soTimeout = IDLE_TIMEOUT_MS
-                return MacConnection(socket, input, sendCipher, recvCipher, reply.optLong("ts", 0))
+                val macClipTs = reply.optLong("ts", 0).coerceAtMost(System.currentTimeMillis())
+                return MacConnection(socket, input, sendCipher, recvCipher, macClipTs, keys.pairingKey)
             } catch (e: Exception) {
                 runCatching { socket.close() }
                 throw e

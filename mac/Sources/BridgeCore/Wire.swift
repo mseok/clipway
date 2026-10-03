@@ -6,6 +6,9 @@ public enum Wire {
     public static let defaultPort: UInt16 = 47823
     public static let serviceType = "_clipway._tcp"
     public static let maxFrame = 2 * 1024 * 1024
+    /// Limit for the frames exchanged before a peer has proved it holds a pairing key.
+    public static let maxHandshakeFrame = 1024
+    public static let maxNameLength = 64
     public static let maxClipBytes = 1024 * 1024
 
     public static func frame(_ payload: Data) -> Data {
@@ -26,10 +29,10 @@ public enum Wire {
     }
 }
 
+/// The plaintext hellos carry no device identifiers: which pairing a phone belongs to
+/// is found by trying the stored keys on its first encrypted record.
 public struct PhoneHello: Codable {
     public var v: Int
-    public var phoneId: String
-    public var macId: String
     public var eph: String
 }
 
@@ -46,6 +49,8 @@ public struct MacHello: Codable {
 /// One encrypted record. `t` is "hello", "clip", "otp", "ping" or "pong".
 public struct Message: Codable, Equatable {
     public var t: String
+    /// Phone id, sent in the phone's encrypted hello.
+    public var id: String?
     public var name: String?
     public var text: String?
     public var sensitive: Bool?
@@ -54,10 +59,11 @@ public struct Message: Codable, Equatable {
     public var sender: String?
 
     public init(
-        t: String, name: String? = nil, text: String? = nil, sensitive: Bool? = nil,
-        ts: Int64? = nil, code: String? = nil, sender: String? = nil
+        t: String, id: String? = nil, name: String? = nil, text: String? = nil,
+        sensitive: Bool? = nil, ts: Int64? = nil, code: String? = nil, sender: String? = nil
     ) {
         self.t = t
+        self.id = id
         self.name = name
         self.text = text
         self.sensitive = sensitive
@@ -67,21 +73,38 @@ public struct Message: Codable, Equatable {
     }
 }
 
+public enum Sanitize {
+    /// Single-line display text from a peer: no control characters, bounded length.
+    public static func label(_ value: String?, maxLength: Int = Wire.maxNameLength) -> String {
+        let cleaned = (value ?? "").unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        return String(String(String.UnicodeScalarView(cleaned)).prefix(maxLength))
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// A verification code is 4 to 8 ASCII digits; anything else is dropped.
+    public static func verificationCode(_ value: String?) -> String? {
+        guard let value, (4...8).contains(value.count),
+            value.allSatisfy({ $0.isASCII && $0.isNumber })
+        else { return nil }
+        return value
+    }
+}
+
 public enum PairingLink {
     /// clipway://pair?v=1&id=..&name=..&psk=<base64url>&port=..&hosts=a,b
     public static func make(macId: String, name: String, psk: Data, port: UInt16, hosts: [String]) -> String {
-        var components = URLComponents()
-        components.scheme = "clipway"
-        components.host = "pair"
-        components.queryItems = [
-            URLQueryItem(name: "v", value: String(Wire.version)),
-            URLQueryItem(name: "id", value: macId),
-            URLQueryItem(name: "name", value: name),
-            URLQueryItem(name: "psk", value: base64URL(psk)),
-            URLQueryItem(name: "port", value: String(port)),
-            URLQueryItem(name: "hosts", value: hosts.joined(separator: ",")),
+        // Everything outside RFC 3986 "unreserved" is percent-encoded, so the link has no
+        // quotes or shell metacharacters whatever the computer is called.
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let items: [(String, String)] = [
+            ("v", String(Wire.version)), ("id", macId), ("name", name), ("psk", base64URL(psk)),
+            ("port", String(port)), ("hosts", hosts.joined(separator: ",")),
         ]
-        return components.string ?? ""
+        let query = items.map { key, value in
+            key + "=" + (value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? "")
+        }
+        return "clipway://pair?" + query.joined(separator: "&")
     }
 
     static func base64URL(_ data: Data) -> String {

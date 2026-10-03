@@ -32,6 +32,13 @@ final class BridgeController: ObservableObject {
     private var sessions: [String: [PhoneSession]] = [:]
     private var pendingPsk: Data?
     private var pendingExpiry: Task<Void, Never>?
+    /// Connections that have not finished the handshake yet, per remote address. One
+    /// address cannot take every slot, so a single host cannot lock real phones out.
+    private var handshaking: [[UInt8]: Int] = [:]
+    /// Arrival times of recent verification codes, for rate limiting.
+    private var recentCodes: [Date] = []
+    private static let maxHandshakingPerPeer = 4
+    private static let maxHandshaking = 64
     private var pairingSignal: DispatchSourceSignal?
     private var terminateSignal: DispatchSourceSignal?
     /// Last text copied on this Mac since launch.
@@ -50,10 +57,11 @@ final class BridgeController: ObservableObject {
         clipboardEnabled = state.clipboardEnabled
         otpEnabled = state.otpEnabled
         otpPresenter.requestPermission()
+        PairingStore.writePendingLink(nil)  // left over if the app quit while pairing
         watcher.onCopy = { [weak self] text, sensitive in self?.localCopy(text, sensitive: sensitive) }
         watcher.start()
         listener.start(
-            port: Wire.defaultPort, macId: state.macId, name: macName,
+            port: Wire.defaultPort, name: macName,
             onConnection: { [weak self] connection in
                 Task { @MainActor in self?.accept(connection) }
             },
@@ -136,23 +144,39 @@ final class BridgeController: ObservableObject {
     // MARK: Sessions
 
     private func accept(_ connection: NWConnection) {
+        // Unauthenticated peers get little: only local networks may connect, only a few
+        // handshakes run at once, and each has six seconds.
+        let candidates = pskCandidates()
+        guard !candidates.isEmpty, let remote = Self.address(of: connection.endpoint),
+            PeerFilter.allows(remote, localSubnets: LocalAddresses.subnets()),
+            handshaking[PeerFilter.bucket(remote), default: 0] < Self.maxHandshakingPerPeer,
+            handshaking.values.reduce(0, +) < Self.maxHandshaking
+        else {
+            connection.cancel()
+            return
+        }
+        let address = PeerFilter.bucket(remote)
+        handshaking[address, default: 0] += 1
         let session = PhoneSession(connection: connection)
         connection.start(queue: .global(qos: .userInitiated))
         Task {
             let timeout = Task {
-                try? await Task.sleep(for: .seconds(10))
+                try? await Task.sleep(for: .seconds(6))
                 if !Task.isCancelled { connection.cancel() }
             }
             var peerId: String?
             do {
-                let peer = try await session.handshake(
-                    macId: state.macId, macName: macName, clipTs: clipTs
-                ) { [weak self] phoneId in
-                    await self?.pskCandidates(for: phoneId) ?? []
+                let peer: PhoneSession.Peer
+                do {
+                    defer {
+                        handshaking[address] = handshaking[address].flatMap { $0 > 1 ? $0 - 1 : nil }
+                    }
+                    peer = try await session.handshake(
+                        macName: macName, clipTs: clipTs, candidates: candidates)
                 }
                 timeout.cancel()
+                guard established(session, peer) else { throw SessionError.authFailed }
                 peerId = peer.phoneId
-                established(session, peer)
                 while true {
                     handle(try await session.receive(), from: session)
                 }
@@ -172,28 +196,47 @@ final class BridgeController: ObservableObject {
         }
     }
 
-    private func pskCandidates(for phoneId: String) -> [Data] {
-        var keys: [Data] = []
-        if let pendingPsk { keys.append(pendingPsk) }
-        if let phone = state.phones.first(where: { $0.id == phoneId }) { keys.append(phone.psk) }
-        return keys
+    private func pskCandidates() -> [PhoneSession.Candidate] {
+        var candidates = state.phones.map { PhoneSession.Candidate(psk: $0.psk, phoneId: $0.id) }
+        if let pendingPsk { candidates.append(PhoneSession.Candidate(psk: pendingPsk, phoneId: nil)) }
+        return candidates
     }
 
-    private func established(_ session: PhoneSession, _ peer: PhoneSession.Peer) {
-        if peer.psk == pendingPsk {
+    /// Raw bytes of the remote IPv4 or IPv6 address.
+    private static func address(of endpoint: NWEndpoint) -> [UInt8]? {
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let address): return [UInt8](address.rawValue)
+        case .ipv6(let address): return [UInt8](address.rawValue)
+        default: return nil
+        }
+    }
+
+    /// Returns false when the key that authenticated the handshake is no longer valid:
+    /// the phone was unpaired, or the QR code was closed or used, while the handshake ran.
+    private func established(_ session: PhoneSession, _ peer: PhoneSession.Peer) -> Bool {
+        if let newKey = peer.newPairingKey {
+            guard peer.psk == pendingPsk else { return false }
+            // The QR code's key is used this once; from now on the phone must present
+            // the key derived from this handshake.
             state.phones.removeAll { $0.id == peer.phoneId }
-            state.phones.append(PairedPhone(id: peer.phoneId, name: peer.name, psk: peer.psk))
+            state.phones.append(PairedPhone(id: peer.phoneId, name: peer.name, psk: newKey))
             endPairing()
             persist()
+            otpPresenter.announce(title: "새 폰이 페어링되었습니다", detail: peer.name)
+        } else {
+            guard state.phones.contains(where: { $0.id == peer.phoneId && $0.psk == peer.psk })
+            else { return false }
         }
         sessions[peer.phoneId, default: []].append(session)
         connected.insert(peer.phoneId)
         refreshStatus()
         Log.net.info("phone connected: \(peer.name, privacy: .public)")
         // Deliver what was copied here while the phone was away.
-        if clipboardEnabled, let clip = localClip, clip.ts > peer.clipTs {
+        if clipboardEnabled, let clip = localClip, clip.ts > min(peer.clipTs, Self.now()) {
             send(clip, to: session)
         }
+        return true
     }
 
     private func handle(_ message: Message, from session: PhoneSession) {
@@ -202,7 +245,8 @@ final class BridgeController: ObservableObject {
             guard clipboardEnabled, let text = message.text, !text.isEmpty,
                 text.utf8.count <= Wire.maxClipBytes
             else { return }
-            let ts = message.ts ?? Self.now()
+            // A timestamp from the future would block later copies; cap it at now.
+            let ts = min(message.ts ?? Self.now(), Self.now())
             guard ts > clipTs else {
                 Log.app.info("clip from phone ignored (older than local)")
                 return
@@ -214,11 +258,18 @@ final class BridgeController: ObservableObject {
             pasteboardText = text
             Log.app.info("clip from phone: \(text.utf8.count) bytes")
         case "otp":
-            guard otpEnabled, let code = message.code, !code.isEmpty else { return }
+            guard otpEnabled, let code = Sanitize.verificationCode(message.code) else { return }
+            // Anyone can text the phone, so codes are rate limited: at most one every two
+            // seconds and five a minute may replace the clipboard.
+            let now = Date()
+            recentCodes.removeAll { now.timeIntervalSince($0) > 60 }
+            guard recentCodes.count < 5, now.timeIntervalSince(recentCodes.last ?? .distantPast) >= 2
+            else { return }
+            recentCodes.append(now)
             watcher.write(code, sensitive: true, thisMacOnly: true)
             clipTs = Self.now()
             pasteboardText = code
-            otpPresenter.present(code: code, sender: message.sender ?? "")
+            otpPresenter.present(code: code, sender: Sanitize.label(message.sender, maxLength: 40))
             Log.app.info("otp from phone")
         case "ping":
             Task { try? await session.send(Message(t: "pong")) }
