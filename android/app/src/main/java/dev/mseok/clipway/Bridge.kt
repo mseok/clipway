@@ -11,14 +11,19 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
+import dev.mseok.clipway.protocol.BridgeCrypto
 import dev.mseok.clipway.protocol.Clip
 import dev.mseok.clipway.protocol.MacConnection
 import dev.mseok.clipway.protocol.PairedMac
 import dev.mseok.clipway.protocol.Wire
 import java.io.File
+import java.io.IOException
+import java.net.NetworkInterface
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -119,6 +124,8 @@ class Bridge(private val context: Context) {
     private var clipboardImage: String? = null
 
     @Volatile private var interactive = false
+    private val pairingInFlight = AtomicBoolean(false)
+    private val persistLock = Any()
     private var retryJob: Job? = null
     private var idleJob: Job? = null
 
@@ -187,12 +194,16 @@ class Bridge(private val context: Context) {
      */
     fun onLocalCopy(text: String, sensitive: Boolean) {
         val clip = recordLocalClip(text, sensitive, manual = false) ?: return
-        if (clipboardEnabled.value) scope.launch { sendToAll(clip) }
+        if (clipboardEnabled.value) links.values.forEach { it.offer(clip) }
     }
 
-    /** Explicit send from the tile or the share menu. Returns true when a Mac received it. */
-    suspend fun sendNow(text: String): Boolean {
-        val clip = recordLocalClip(text, sensitive = false, manual = true) ?: return false
+    /**
+     * Explicit send from the tile or the share menu. Returns true when a Mac received it.
+     * The person asked for this text to be sent, so it goes even when sensitive copies are
+     * otherwise held back; it keeps its sensitive mark.
+     */
+    suspend fun sendNow(text: String, sensitive: Boolean): Boolean {
+        val clip = recordLocalClip(text, sensitive, manual = true) ?: return false
         return sendToAll(clip)
     }
 
@@ -227,7 +238,9 @@ class Bridge(private val context: Context) {
     }
 
     /** A picture was copied on this phone (reported by the Shizuku watcher). */
-    fun onLocalImage(mime: String, bytes: ByteArray) {
+    fun onLocalImage(mime: String, bytes: ByteArray, sensitive: Boolean) {
+        // The type label comes from whichever app copied; the bytes have to agree with it.
+        if (!Wire.looksLike(mime, bytes)) return
         val clip: Clip
         synchronized(clipLock) {
             val digest = sha256(bytes)
@@ -236,17 +249,23 @@ class Bridge(private val context: Context) {
             clipboardText = null
             val now = System.currentTimeMillis()
             clipTs = now
-            clip = Clip("", false, now, Clip.Image(mime, bytes)).also { localClip = it }
+            if (sensitive && skipSensitive.value) {
+                localClip = null
+                return
+            }
+            clip = Clip("", sensitive, now, Clip.Image(mime, bytes)).also { localClip = it }
         }
-        if (clipboardEnabled.value) scope.launch { sendToAll(clip) }
+        if (clipboardEnabled.value) links.values.forEach { it.offer(clip) }
     }
 
-    private fun applyRemoteImage(image: Clip.Image, reportedTs: Long) {
-        if (!clipboardEnabled.value) return
-        val ts = reportedTs.coerceAtMost(System.currentTimeMillis())
+    private fun applyRemoteImage(image: Clip.Image, sensitive: Boolean, reportedTs: Long, offset: Long) {
+        val now = System.currentTimeMillis()
+        val ts = Wire.translate(reportedTs, offset, now) ?: now
         synchronized(clipLock) {
             if (ts <= clipTs) return
+            // Recorded even with sync off, so the Mac does not offer it again at every connect.
             clipTs = ts
+            if (!clipboardEnabled.value || !Wire.looksLike(image.mime, image.bytes)) return
             val digest = sha256(image.bytes)
             if (digest == clipboardImage) return
             clipboardImage = digest
@@ -259,7 +278,13 @@ class Bridge(private val context: Context) {
             val file = File(directory, "clip-$ts.${Wire.IMAGE_TYPES.getValue(image.mime)}")
             file.writeBytes(image.bytes)
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.clips", file)
-            clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Clipway", uri))
+            val data = ClipData.newUri(context.contentResolver, "Clipway", uri)
+            if (sensitive) {
+                data.description.extras = PersistableBundle().apply {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
+            }
+            clipboard.setPrimaryClip(data)
         }.onFailure { Log.w(TAG, "image write failed", it) }
         Log.i(TAG, "image from Mac: ${image.bytes.size} bytes")
     }
@@ -267,13 +292,15 @@ class Bridge(private val context: Context) {
     private fun sha256(bytes: ByteArray) =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-    private fun applyRemoteClip(text: String, sensitive: Boolean, reportedTs: Long) {
-        if (!clipboardEnabled.value || text.isEmpty() || text.length > Wire.MAX_CLIP_CHARS) return
-        // A timestamp from the future would block later copies; cap it at now.
-        val ts = reportedTs.coerceAtMost(System.currentTimeMillis())
+    private fun applyRemoteClip(text: String, sensitive: Boolean, reportedTs: Long, offset: Long) {
+        if (text.isEmpty() || text.length > Wire.MAX_CLIP_CHARS) return
+        val now = System.currentTimeMillis()
+        val ts = Wire.translate(reportedTs, offset, now) ?: now
         synchronized(clipLock) {
             if (ts <= clipTs) return
+            // Recorded even with sync off, so the Mac does not offer it again at every connect.
             clipTs = ts
+            if (!clipboardEnabled.value) return
             // Already there (another sync tool delivered it first): nothing to write.
             if (text == clipboardText) return
             clipboardText = text
@@ -316,17 +343,38 @@ class Bridge(private val context: Context) {
      * from that handshake, so the QR code cannot be used again by anyone who saw it.
      */
     suspend fun pair(mac: PairedMac): Boolean = withContext(Dispatchers.IO) {
-        val link = Link(mac, pairing = true)
-        link.ensureConnected() ?: return@withContext false
-        links.put(mac.id, link)?.retire()
-        persist()
-        true
+        // One pairing at a time: two handshakes with the same QR key could leave the two
+        // sides with keys from different handshakes.
+        if (!pairingInFlight.compareAndSet(false, true)) return@withContext false
+        try {
+            val link = Link(mac, pairing = true)
+            val opened = link.ensureConnected() ?: return@withContext false
+            links.put(mac.id, link)?.retire()
+            persist()
+            // The first record under the new key tells the Mac that the phone has it.
+            runCatching { opened.send(JSONObject().put("t", "ping")) }
+            true
+        } finally {
+            pairingInFlight.set(false)
+        }
     }
 
     fun unpair(macId: String) {
         links.remove(macId)?.retire()
         persist()
     }
+
+    /** The check code to compare with the one the Mac shows for this phone. */
+    fun pairingCode(mac: PairedMac): String = BridgeCrypto.pairingCode(mac.psk)
+
+    /**
+     * True for loopback and for this phone's own addresses. A "Mac" at such an address
+     * would be another app on this phone, so they are never dialled.
+     */
+    fun isOwnAddress(host: String): Boolean = runCatching {
+        host.startsWith("127.") || NetworkInterface.getNetworkInterfaces().asSequence()
+            .flatMap { it.inetAddresses.asSequence() }.any { it.hostAddress == host }
+    }.getOrDefault(true)
 
     fun setClipboardEnabled(value: Boolean) {
         store.clipboardEnabled = value
@@ -343,7 +391,7 @@ class Bridge(private val context: Context) {
         skipSensitive.value = value
     }
 
-    private fun persist() {
+    private fun persist() = synchronized(persistLock) {
         val current = links.values.map { it.mac }.sortedBy { it.name }
         store.saveMacs(current)
         macs.value = current
@@ -360,6 +408,30 @@ class Bridge(private val context: Context) {
         @Volatile var connection: MacConnection? = null
         @Volatile private var retired = false
         private val tests = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+        private val outbox = AtomicReference<Clip?>(null)
+        private val draining = AtomicBoolean(false)
+
+        /**
+         * Queues a copy for this Mac. Only the newest waiting copy is kept, so a burst of
+         * large pictures on a slow link cannot pile up in memory.
+         */
+        fun offer(clip: Clip) {
+            outbox.set(clip)
+            if (!draining.compareAndSet(false, true)) return
+            scope.launch {
+                try {
+                    while (true) {
+                        val next = outbox.getAndSet(null) ?: break
+                        val sent = runCatching { ensureConnected()?.sendClip(next) != null }.getOrDefault(false)
+                        val what = next.image?.let { "image ${it.bytes.size} bytes" } ?: "${next.text.length} chars"
+                        Log.i(TAG, "local copy: $what -> ${mac.name}: ${if (sent) "sent" else "not sent"}")
+                    }
+                } finally {
+                    draining.set(false)
+                    outbox.getAndSet(null)?.let(::offer)
+                }
+            }
+        }
 
         suspend fun test(): LinkTest {
             val opened = runCatching { ensureConnected() }.getOrNull() ?: return LinkTest(mac.name, null)
@@ -380,26 +452,35 @@ class Bridge(private val context: Context) {
                     return@withLock null
                 }
                 connection = opened
+                if (retired) {  // unpaired while the connection was being stored
+                    drop(opened, retry = false)
+                    return@withLock null
+                }
                 connected.update { it + mac.id }
                 Log.i(TAG, "connected to ${mac.name}")
                 scope.launch { readLoop(opened) }
                 scope.launch { pingLoop(opened) }
                 if (!interactive) armIdleClose()
-                // Deliver what was copied here while this Mac was out of reach.
+                // Deliver what was copied here while this Mac was out of reach. Queued rather
+                // than sent here, so a large picture does not hold this lock.
                 val pending = synchronized(clipLock) { localClip }
-                if (clipboardEnabled.value && pending != null && pending.ts > opened.macClipTs) {
-                    runCatching { opened.sendClip(pending) }
+                if (clipboardEnabled.value && pending != null && pending.ts > opened.macClipTs &&
+                    !(pending.sensitive && skipSensitive.value)
+                ) {
+                    offer(pending)
                 }
             }
         }
 
         private suspend fun connect(): MacConnection? {
-            val hosts = (listOfNotNull(mac.lastHost) + mac.hosts + locator.hosts()).distinct()
             val ts = synchronized(clipLock) { clipTs }
             if (pairing) {
-                // One address at a time: the QR code's key must be spent on exactly one
-                // handshake, or the two sides could keep keys from different handshakes.
-                for (host in hosts) {
+                // Only the addresses in the QR code are tried: with the QR key in hand,
+                // anything that merely announces itself on the Wi-Fi could otherwise take the
+                // Mac's place. Bonjour is used only when the code carries no usable address.
+                // One address at a time, so the key is spent on exactly one handshake.
+                val targets = mac.hosts.ifEmpty { locator.hosts() }.filterNot(::isOwnAddress)
+                for (host in targets) {
                     val opened = runCatching {
                         MacConnection.open(host, mac.port, mac.psk, store.phoneId, phoneName, ts)
                     }.getOrNull() ?: continue
@@ -410,6 +491,7 @@ class Bridge(private val context: Context) {
                 return null
             }
             // Otherwise race every known address; the first completed handshake wins.
+            val hosts = (listOfNotNull(mac.lastHost) + mac.hosts + locator.hosts()).distinct().filterNot(::isOwnAddress)
             val winner = CompletableDeferred<Pair<String, MacConnection>?>()
             val attempts = hosts.map { host ->
                 scope.launch {
@@ -433,23 +515,56 @@ class Bridge(private val context: Context) {
         }
 
         private fun readLoop(opened: MacConnection) {
+            var header: JSONObject? = null  // the picture that is still arriving
+            var picture = ByteArray(0)
+            var filled = 0
             try {
                 while (true) {
-                    val message = opened.receive()
-                    when (message.optString("t")) {
-                        "clip" -> applyRemoteClip(
-                            message.optString("text"),
-                            message.optBoolean("sensitive"),
-                            message.optLong("ts") + opened.clockOffset,
-                        )
-                        "image" -> applyRemoteImage(
-                            opened.receiveImage(message),
-                            message.optLong("ts") + opened.clockOffset,
-                        )
-                        "tested" -> tests.remove(message.optLong("n"))?.complete(Unit)
+                    when (val record = opened.receive()) {
+                        is MacConnection.Record.Chunk -> {
+                            val announced = header ?: throw IOException("picture data without a header")
+                            if (record.bytes.isEmpty() || filled + record.bytes.size > picture.size) {
+                                throw IOException("bad picture data")
+                            }
+                            record.bytes.copyInto(picture, filled)
+                            filled += record.bytes.size
+                            if (filled == picture.size) {
+                                applyRemoteImage(
+                                    Clip.Image(announced.getString("mime"), picture),
+                                    announced.optBoolean("sensitive"),
+                                    announced.optLong("ts"),
+                                    opened.clockOffset,
+                                )
+                                header = null
+                                picture = ByteArray(0)
+                            }
+                        }
+                        is MacConnection.Record.Message -> {
+                            val message = record.json
+                            when (message.optString("t")) {
+                                "clip" -> applyRemoteClip(
+                                    message.optString("text"),
+                                    message.optBoolean("sensitive"),
+                                    message.optLong("ts"),
+                                    opened.clockOffset,
+                                )
+                                "image" -> {
+                                    val size = message.optInt("size")
+                                    if (size !in 1..Wire.MAX_IMAGE_BYTES || message.optString("mime") !in Wire.IMAGE_TYPES) {
+                                        throw IOException("bad picture header")
+                                    }
+                                    header = message
+                                    picture = ByteArray(size)
+                                    filled = 0
+                                }
+                                "tested" -> tests.remove(message.optLong("n"))?.complete(Unit)
+                            }
+                        }
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable, not Exception: a record a parser chokes on (for example one that
+                // exhausts the stack) must end this connection, not the whole app.
                 Log.i(TAG, "connection to ${mac.name} ended: ${e.javaClass.simpleName}")
             } finally {
                 drop(opened, retry = true)

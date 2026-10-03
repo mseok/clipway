@@ -1,6 +1,7 @@
 package dev.mseok.clipway.ui
 
 import android.Manifest
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -40,6 +41,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -57,6 +62,7 @@ import dev.mseok.clipway.ClipboardWatcher
 import dev.mseok.clipway.LinkTest
 import dev.mseok.clipway.PairingRequest
 import dev.mseok.clipway.protocol.PairedMac
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -79,6 +85,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         BridgeService.start(this)
+        // No other app may draw over this screen: the pairing dialog must be what it seems.
+        window.setHideOverlayWindows(true)
         // Folding the phone recreates the activity with the same intent; handle it only once.
         if (savedInstanceState == null) intent?.dataString?.let { requestPairing(it, external = true) }
         setContent {
@@ -130,24 +138,34 @@ class MainActivity : ComponentActivity() {
      * link can come from any app or web page. Nothing is paired until the user confirms.
      */
     private fun requestPairing(link: String, external: Boolean) {
-        val mac = PairedMac.fromPairingLink(link) ?: return toast("Clipway QR이 아닙니다")
-        (application as BridgeApp).pendingPairing.value = PairingRequest(mac, external)
+        val pending = (application as BridgeApp).pendingPairing
+        // A request from outside must not change a dialog that is already on screen.
+        if (external && pending.value != null) return
+        val parsed = PairedMac.fromPairingLink(link) ?: return toast("Clipway QR이 아닙니다")
+        // An address of this phone itself would be another app here posing as a Mac.
+        val mac = parsed.copy(hosts = parsed.hosts.filterNot(bridge::isOwnAddress))
+        pending.value = PairingRequest(mac, external)
     }
 
     private fun pair(mac: PairedMac) {
         toast("${mac.name}에 연결하는 중")
         lifecycleScope.launch {
             val paired = bridge.pair(mac)
-            toast(if (paired) "${mac.name} 페어링 완료" else "Mac에 연결하지 못했습니다. 같은 Wi-Fi이거나 Tailscale이 켜져 있는지 확인해 주세요")
+            val code = bridge.macs.value.firstOrNull { it.id == mac.id }?.let(bridge::pairingCode)
+            toast(
+                if (paired) "${mac.name} 페어링 완료 · 확인 코드 $code (Mac 화면의 숫자와 같아야 합니다)"
+                else "Mac에 연결하지 못했습니다. 같은 Wi-Fi이거나 Tailscale이 켜져 있는지 확인해 주세요"
+            )
         }
     }
 
     private fun sendClipboard() {
         val clip = getSystemService(ClipboardManager::class.java).primaryClip
-        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
         if (text.isNullOrEmpty()) return toast("클립보드에 텍스트가 없습니다")
+        val sensitive = clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) ?: false
         lifecycleScope.launch {
-            toast(if (bridge.sendNow(text)) "Mac으로 보냈습니다" else "연결된 Mac이 없습니다")
+            toast(if (bridge.sendNow(text, sensitive)) "Mac으로 보냈습니다" else "연결된 Mac이 없습니다")
         }
     }
 
@@ -216,6 +234,15 @@ class MainActivity : ComponentActivity() {
             // the app may add a Mac but never take the place of one that is already paired.
             val replaces = macs.any { it.id == mac.id || it.name == mac.name }
             val blocked = request.external && replaces
+            // A request from outside can pop up under a finger that was about to tap
+            // something else, so its button only works after a moment.
+            var armed by remember(request) { mutableStateOf(!request.external) }
+            LaunchedEffect(request) {
+                if (request.external) {
+                    delay(2500)
+                    armed = true
+                }
+            }
             AlertDialog(
                 onDismissRequest = { pendingPairing.value = null },
                 title = { Text(if (blocked) "페어링할 수 없습니다" else "이 Mac과 페어링할까요?") },
@@ -249,10 +276,10 @@ class MainActivity : ComponentActivity() {
                     if (blocked) {
                         TextButton(onClick = { pendingPairing.value = null }) { Text("닫기") }
                     } else {
-                        Button(onClick = {
+                        Button(enabled = armed, onClick = {
                             pendingPairing.value = null
                             pair(mac)
-                        }) { Text("페어링") }
+                        }) { Text(if (armed) "페어링" else "잠시만…") }
                     }
                 },
                 dismissButton = {
@@ -280,7 +307,8 @@ class MainActivity : ComponentActivity() {
                         Column(Modifier.weight(1f)) {
                             Text(mac.name)
                             Text(
-                                if (mac.id in connected) "연결됨" else "연결 대기 중",
+                                (if (mac.id in connected) "연결됨" else "연결 대기 중") +
+                                    " · 확인 코드 " + bridge.pairingCode(mac),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

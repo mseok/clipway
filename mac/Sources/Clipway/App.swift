@@ -1,4 +1,5 @@
 import AppKit
+import BridgeCore
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
@@ -45,7 +46,11 @@ struct PanelView: View {
                     Circle()
                         .fill(controller.connected.contains(phone.id) ? Color.green : Color.secondary.opacity(0.4))
                         .frame(width: 8, height: 8)
-                    Text(phone.name)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(phone.name)
+                        Text("확인 코드 \(PairingCode.code(for: phone.psk))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("해제") { controller.unpair(phone) }
                         .buttonStyle(.borderless)

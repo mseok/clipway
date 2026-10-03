@@ -22,13 +22,22 @@ reproduce.
 - Other apps and web pages on the phone: they cannot pair the phone with a device of
   their choosing without the user confirming it, and cannot make Clipway read the
   clipboard for them.
-- Forged or malformed input from a paired device: sizes, timestamps and verification
-  codes are validated on receipt.
+- Forged or malformed input from a paired device: sizes, timestamps, verification codes
+  and pictures (type and dimensions) are checked on receipt, and a bad record ends that
+  connection, not the app.
+- Another app on the phone posing as a Mac: addresses of the phone itself are never
+  dialled, a pairing request from outside the app cannot change a dialog that is already
+  open, its button only works after a pause, and other apps cannot draw over it.
 
 ## What it does not defend against
 
 - Someone who obtains the pairing QR code while it is on screen and uses it before or
   during your own pairing, or who obtains the stored keys from a device.
+- A person who is tricked into confirming a pairing with a device that is not theirs.
+  Both devices show a four-digit check code for each pairing; if the Mac shows no new
+  pairing, or a different code, unpair on the phone.
+- Any app on the phone copying a `content://` picture reference: the watcher reads it
+  with shell privileges and sends it to the paired Macs (never back to that app).
 - A paired device, or anyone who can text the phone, changing what is on the clipboard:
   clipboard sync carries whatever is copied, and verification codes are copied on arrival
   (rate limited, digits only).

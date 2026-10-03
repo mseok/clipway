@@ -12,6 +12,9 @@ import android.os.Process
 import android.util.Log
 import androidx.annotation.Keep
 import dev.mseok.clipway.protocol.Wire
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
@@ -25,6 +28,9 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
         ShellContext(context).getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     private var listener: ClipboardManager.OnPrimaryClipChangedListener? = null
     private val ownerUid = context.applicationInfo.uid
+    /** Pictures are fetched here, so a slow or stuck source never delays the listener. */
+    private val pictures = Executors.newSingleThreadExecutor()
+    private val generation = AtomicInteger()
 
     @Synchronized
     override fun watch(callback: IClipboardCallback) {
@@ -34,24 +40,28 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
         listener?.let(manager::removePrimaryClipChangedListener)
         listener = ClipboardManager.OnPrimaryClipChangedListener {
             runCatching {
+                val current = generation.incrementAndGet()
                 val clip = manager.primaryClip
                 val item = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
                 val text = item?.text?.toString()
                 // Lengths only: clipboard contents never go to the log.
                 Log.i(TAG, "clipboard changed: ${text?.length ?: -1} chars")
                 if (clip == null) return@runCatching
+                val sensitive =
+                    clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) ?: false
                 if (text.isNullOrEmpty()) {
                     val uri = item?.uri ?: return@runCatching
                     val mime = clip.description.filterMimeTypes("image/*")?.firstOrNull { it in Wire.IMAGE_TYPES }
                     // Our own authority means the picture came from a Mac a moment ago.
                     if (mime != null && uri.scheme == "content" && uri.authority != OWN_AUTHORITY) {
-                        sendImage(callback, uri, mime)
+                        pictures.execute {
+                            runCatching { sendImage(callback, uri, mime, sensitive, current) }
+                                .onFailure { Log.w(TAG, "picture read failed", it) }
+                        }
                     }
                     return@runCatching
                 }
                 if (text.length > Wire.MAX_CLIP_CHARS) return@runCatching
-                val sensitive =
-                    clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) ?: false
                 callback.onClipboardChanged(text, sensitive)
             }.onFailure { Log.w(TAG, "clipboard read failed", it) }
         }.also(manager::addPrimaryClipChangedListener)
@@ -59,22 +69,33 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
     }
 
     /**
-     * Reading the clipboard as the shell also grants the shell read access to the copied
-     * picture, so the system's own `content` tool can fetch it. The URI is passed as one
-     * argument; no shell is involved.
+     * Fetches the copied picture with the system's own `content` tool, which runs as the
+     * shell like this process. The URI is passed as one argument; no shell is involved.
+     *
+     * The URI was chosen by whichever app copied, so the source is not trusted: a provider
+     * that never finishes is cut off after a few seconds, and the result is dropped if
+     * something else has been copied in the meantime. The bytes only ever go to this
+     * app, which sends them to the paired Macs, never back to the app that copied.
      */
-    private fun sendImage(callback: IClipboardCallback, uri: Uri, mime: String) {
+    private fun sendImage(callback: IClipboardCallback, uri: Uri, mime: String, sensitive: Boolean, current: Int) {
         val process = ProcessBuilder("content", "read", "--uri", uri.toString()).start()
-        val bytes = process.inputStream.use { it.readNBytes(Wire.MAX_IMAGE_BYTES + 1) }
-        process.destroy()
-        Log.i(TAG, "image copied: ${bytes.size} bytes")
-        if (bytes.isEmpty() || bytes.size > Wire.MAX_IMAGE_BYTES) return
+        process.errorStream.close()
+        val result = AtomicReference<ByteArray?>()
+        val reader = thread {
+            result.set(runCatching { process.inputStream.use { it.readNBytes(Wire.MAX_IMAGE_BYTES + 1) } }.getOrNull())
+        }
+        reader.join(READ_TIMEOUT_MS)
+        process.destroyForcibly()  // also unblocks the reader if the source never finished
+        val bytes = result.get()
+        Log.i(TAG, "image copied: ${bytes?.size ?: -1} bytes")
+        if (bytes == null || bytes.isEmpty() || bytes.size > Wire.MAX_IMAGE_BYTES) return
+        if (generation.get() != current) return
         // Too large for a binder transaction, so it is streamed through a pipe.
         val (read, write) = ParcelFileDescriptor.createPipe()
         thread {
             runCatching { ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(bytes) } }
         }
-        callback.onImageCopied(read, mime, bytes.size)
+        callback.onImageCopied(read, mime, bytes.size, sensitive)
         read.close()
     }
 
@@ -85,6 +106,7 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
     private companion object {
         const val TAG = "ClipwayWatcher"
         const val OWN_AUTHORITY = "dev.mseok.clipway.clips"
+        const val READ_TIMEOUT_MS = 8_000L
     }
 }
 

@@ -17,7 +17,8 @@ final class PasteboardWatcher {
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var timer: Timer?
     var onCopy: ((_ text: String, _ sensitive: Bool) -> Void)?
-    var onImageCopy: ((_ mime: String, _ data: Data) -> Void)?
+    var onImageCopy: ((_ mime: String, _ data: Data, _ sensitive: Bool) -> Void)?
+    private var tiffProvider: LazyTIFF?
 
     func start() {
         lastChangeCount = pasteboard.changeCount
@@ -37,7 +38,7 @@ final class PasteboardWatcher {
             return
         }
         if let (mime, data) = image(), data.count <= Wire.maxImageBytes {
-            onImageCopy?(mime, data)
+            onImageCopy?(mime, data, types.contains(Self.concealed))
         }
     }
 
@@ -53,12 +54,17 @@ final class PasteboardWatcher {
         return nil
     }
 
-    /// Returns false when the data is not an image this Mac can decode.
-    func writeImage(_ data: Data, mime: String) -> Bool {
-        guard let tiff = NSImage(data: data)?.tiffRepresentation else { return false }
+    /// Returns false when the data is not a picture of the declared type and a sane size.
+    func writeImage(_ data: Data, mime: String, sensitive: Bool) -> Bool {
+        guard let type = ImageCheck.pasteboardType(of: data, mime: mime) else { return false }
+        let item = NSPasteboardItem()
+        item.setData(data, forType: type)
+        let provider = LazyTIFF(source: data)
+        item.setDataProvider(provider, forTypes: [.tiff])
+        if sensitive { item.setString("", forType: Self.concealed) }
         pasteboard.clearContents()
-        if mime == "image/png" { pasteboard.setData(data, forType: .png) }
-        pasteboard.setData(tiff, forType: .tiff)
+        pasteboard.writeObjects([item])
+        tiffProvider = provider
         lastChangeCount = pasteboard.changeCount
         return true
     }

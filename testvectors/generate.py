@@ -21,8 +21,13 @@ Pairing: the QR code carries a one-time psk. When a handshake is authenticated w
 it, both sides store pairingKey as the long-term psk for that phone and forget the QR
 key, so a copy of the QR code is worthless afterwards.
 
-Pictures: image {mime, size, ts}, either way, is followed by raw records (the picture's
-bytes, 256 KiB of plaintext each) until size bytes have arrived; size is at most 20 MiB.
+Pictures: image {mime, size, sensitive, ts}, either way, is followed by chunk records
+until size bytes have arrived (at most 20 MiB). A chunk record's plaintext is a zero
+byte followed by up to 256 KiB of the picture. JSON records start with "{", so the two
+kinds cannot be confused and other records (ping, otp) may come between chunks.
+
+Pairing check code: both devices show int(SHA256("clipway-code" || pairingKey)[0:4]) mod
+10000 as four digits, so a person can see that the phone paired with this Mac.
 
 Records: clip {text, sensitive, ts} both ways; otp {code, sender} and ping from the
 phone, pong from the Mac; test {n} from the phone is answered with tested {n} and shown
@@ -97,6 +102,7 @@ vectors = {
     "phoneToMacKey": b64(phone_to_mac),
     "macToPhoneKey": b64(mac_to_phone),
     "pairingKey": b64(pairing_key),
+    "pairingCode": "%04d" % (int.from_bytes(hashlib.sha256(b"clipway-code" + pairing_key).digest()[:4], "big") % 10000),
     "records": records,
 }
 

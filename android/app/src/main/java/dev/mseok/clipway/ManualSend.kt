@@ -2,6 +2,7 @@ package dev.mseok.clipway
 
 import android.app.Activity
 import android.app.PendingIntent
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
@@ -13,14 +14,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Sends text to the paired Macs without the Shizuku watcher and reports the result in a toast. */
-private fun Activity.sendToMac(text: String?) {
+private fun Activity.sendToMac(text: String?, sensitive: Boolean = false) {
     val bridge = (application as BridgeApp).bridge
     val context = applicationContext
     if (text.isNullOrEmpty()) {
         Toast.makeText(context, "보낼 텍스트가 없습니다", Toast.LENGTH_SHORT).show()
     } else {
         bridge.scope.launch {
-            val delivered = bridge.sendNow(text)
+            val delivered = bridge.sendNow(text, sensitive)
             withContext(Dispatchers.Main) {
                 val message = if (delivered) "Mac으로 보냈습니다" else "연결된 Mac이 없습니다"
                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
@@ -60,8 +61,11 @@ class SendClipboardActivity : Activity() {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus || handled) return
         handled = true
+        // Only text that is on the clipboard as text. A copied URI is not opened here: it
+        // points at another app, which could answer with an endless stream.
         val clip = getSystemService(ClipboardManager::class.java).primaryClip
-        sendToMac(clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString())
+        val sensitive = clip?.description?.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) ?: false
+        sendToMac(clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString(), sensitive)
     }
 }
 

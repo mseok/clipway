@@ -69,9 +69,11 @@ class MacLocator(context: Context) {
 
     private fun isOnLink(address: Inet4Address): Boolean = runCatching {
         NetworkInterface.getNetworkInterfaces().asSequence()
+            .filterNot { it.isLoopback }
             .flatMap { it.interfaceAddresses.asSequence() }
             .any { local ->
                 val own = local.address as? Inet4Address ?: return@any false
+                if (own == address) return@any false  // this phone itself is never a Mac
                 val prefix = local.networkPrefixLength.toInt()
                 if (prefix !in 1..31) return@any false
                 val mask = -1 shl (32 - prefix)
