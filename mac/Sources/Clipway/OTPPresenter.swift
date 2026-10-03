@@ -10,6 +10,7 @@ import UserNotifications
 @MainActor
 final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
     private var notificationsGranted = false
+    var soundEnabled = false
     private var panel: NSPanel?
     private var dismissal: Task<Void, Never>?
 
@@ -28,7 +29,7 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = detail
-            content.sound = .default
+            content.sound = soundEnabled ? .default : nil
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         } else {
@@ -59,7 +60,7 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
             panel.setFrameOrigin(NSPoint(x: frame.maxX - size.width - 16, y: frame.maxY - size.height - 12))
         }
         panel.orderFrontRegardless()
-        NSSound(named: "Glass")?.play()
+        if soundEnabled { NSSound(named: "Glass")?.play() }
         self.panel = panel
         Log.app.info(
             "banner shown: visible=\(panel.isVisible) frame=\(NSStringFromRect(panel.frame), privacy: .public)")

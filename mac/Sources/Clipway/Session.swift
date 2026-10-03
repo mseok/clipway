@@ -55,8 +55,11 @@ actor PhoneSession {
         let psk: Data
         /// Set when the handshake used the QR code's key: the key to store for this phone.
         let newPairingKey: Data?
-        /// When the phone's current clipboard content was copied (0 if unknown).
+        /// When the phone's current clipboard content was copied (0 if unknown), on this Mac's clock.
         let clipTs: Int64
+        /// Add this to a timestamp from the phone to get the time on this Mac's clock. The two
+        /// clocks can be seconds apart, and "newest copy wins" needs them compared fairly.
+        let clockOffset: Int64
     }
 
     nonisolated let connection: NWConnection
@@ -105,12 +108,14 @@ actor PhoneSession {
             else { throw SessionError.malformed }
             recvCipher = cipher
             sendCipher = FrameCipher(key: keys.macToPhone)
-            try send(Message(t: "hello", name: macName, ts: clipTs))
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try send(Message(t: "hello", name: macName, ts: clipTs, now: now))
             let name = Sanitize.label(message.name)
+            let offset = message.now.map { now - $0 } ?? 0
             return Peer(
                 phoneId: phoneId, name: name.isEmpty ? "Android" : name, psk: candidate.psk,
                 newPairingKey: candidate.phoneId == nil ? keys.pairingKey : nil,
-                clipTs: message.ts ?? 0)
+                clipTs: message.ts.map { $0 == 0 ? 0 : $0 + offset } ?? 0, clockOffset: offset)
         }
         throw SessionError.authFailed
     }
@@ -122,11 +127,33 @@ actor PhoneSession {
         return try JSONDecoder().decode(Message.self, from: plaintext)
     }
 
+    /// The raw bytes of one record, for the records that follow an "image" record.
+    func receiveData() async throws -> Data {
+        let sealed = try await readFrame()
+        guard recvCipher != nil else { throw SessionError.malformed }
+        return try recvCipher!.open(sealed)
+    }
+
     /// Seals and enqueues in one step on the actor, so records reach the connection in
     /// counter order even when several tasks send at once.
     func send(_ message: Message) throws {
+        try sendRecord(Wire.encode(message))
+    }
+
+    /// The header and every chunk are enqueued in this one call, so nothing can come between them.
+    func sendImage(mime: String, data: Data, ts: Int64) throws {
+        try send(Message(t: "image", ts: ts, mime: mime, size: data.count))
+        var offset = data.startIndex
+        while offset < data.endIndex {
+            let end = min(offset + Wire.imageChunk, data.endIndex)
+            try sendRecord(data[offset..<end])
+            offset = end
+        }
+    }
+
+    private func sendRecord(_ plaintext: Data) throws {
         guard sendCipher != nil else { throw SessionError.malformed }
-        let sealed = try sendCipher!.seal(Wire.encode(message))
+        let sealed = try sendCipher!.seal(plaintext)
         connection.send(
             content: Wire.frame(sealed),
             completion: .contentProcessed { [connection] error in

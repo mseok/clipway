@@ -13,6 +13,7 @@ struct StoredState: Codable {
     var otpEnabled = true
     /// Optional so that state files written before this setting existed still load.
     var skipSensitive: Bool?
+    var soundEnabled: Bool?
 }
 
 /// Persists pairings in ~/Library/Application Support/Clipway/state.json (0600).

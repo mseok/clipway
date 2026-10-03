@@ -5,11 +5,14 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.net.Uri
 import android.os.Binder
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.util.Log
 import androidx.annotation.Keep
 import dev.mseok.clipway.protocol.Wire
+import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
 /**
@@ -32,10 +35,21 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
         listener = ClipboardManager.OnPrimaryClipChangedListener {
             runCatching {
                 val clip = manager.primaryClip
-                val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+                val item = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                val text = item?.text?.toString()
                 // Lengths only: clipboard contents never go to the log.
                 Log.i(TAG, "clipboard changed: ${text?.length ?: -1} chars")
-                if (clip == null || text.isNullOrEmpty() || text.length > Wire.MAX_CLIP_CHARS) return@runCatching
+                if (clip == null) return@runCatching
+                if (text.isNullOrEmpty()) {
+                    val uri = item?.uri ?: return@runCatching
+                    val mime = clip.description.filterMimeTypes("image/*")?.firstOrNull { it in Wire.IMAGE_TYPES }
+                    // Our own authority means the picture came from a Mac a moment ago.
+                    if (mime != null && uri.scheme == "content" && uri.authority != OWN_AUTHORITY) {
+                        sendImage(callback, uri, mime)
+                    }
+                    return@runCatching
+                }
+                if (text.length > Wire.MAX_CLIP_CHARS) return@runCatching
                 val sensitive =
                     clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) ?: false
                 callback.onClipboardChanged(text, sensitive)
@@ -44,12 +58,33 @@ class ClipboardWatcherService @Keep constructor(context: Context) : IClipboardWa
         Log.i(TAG, "watching clipboard as uid ${Process.myUid()}")
     }
 
+    /**
+     * Reading the clipboard as the shell also grants the shell read access to the copied
+     * picture, so the system's own `content` tool can fetch it. The URI is passed as one
+     * argument; no shell is involved.
+     */
+    private fun sendImage(callback: IClipboardCallback, uri: Uri, mime: String) {
+        val process = ProcessBuilder("content", "read", "--uri", uri.toString()).start()
+        val bytes = process.inputStream.use { it.readNBytes(Wire.MAX_IMAGE_BYTES + 1) }
+        process.destroy()
+        Log.i(TAG, "image copied: ${bytes.size} bytes")
+        if (bytes.isEmpty() || bytes.size > Wire.MAX_IMAGE_BYTES) return
+        // Too large for a binder transaction, so it is streamed through a pipe.
+        val (read, write) = ParcelFileDescriptor.createPipe()
+        thread {
+            runCatching { ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(bytes) } }
+        }
+        callback.onImageCopied(read, mime, bytes.size)
+        read.close()
+    }
+
     override fun destroy() {
         exitProcess(0)
     }
 
     private companion object {
         const val TAG = "ClipwayWatcher"
+        const val OWN_AUTHORITY = "dev.mseok.clipway.clips"
     }
 }
 

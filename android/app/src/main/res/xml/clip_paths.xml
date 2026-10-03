@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pictures received from a Mac, offered to other apps through the clipboard only. -->
+<paths>
+    <cache-path name="clips" path="clips/" />
+</paths>

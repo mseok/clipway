@@ -19,10 +19,19 @@ final class BridgeController: ObservableObject {
     @Published var otpEnabled = true { didSet { persist() } }
     /// When on, copies that the source app marked as concealed (password managers do) stay on this Mac.
     @Published var skipSensitive = false { didSet { persist() } }
+    /// Sound with the banner for codes, pairing and tests. Off unless switched on.
+    @Published var soundEnabled = false {
+        didSet {
+            otpPresenter.soundEnabled = soundEnabled
+            persist()
+        }
+    }
 
     private struct Clip {
-        let text: String
-        let sensitive: Bool
+        var text = ""
+        /// Set for a copied picture; `text` is then empty.
+        var image: (mime: String, data: Data)?
+        var sensitive = false
         let ts: Int64
     }
 
@@ -52,6 +61,8 @@ final class BridgeController: ObservableObject {
     /// What the pasteboard is known to hold. A change that reports the same text (another
     /// clipboard tool rewriting it, a repeated copy) is not sent again.
     private var pasteboardText: String?
+    /// SHA-256 of the picture the pasteboard is known to hold, for the same purpose.
+    private var pasteboardImage: Data?
 
     let macName = Host.current().localizedName ?? "Mac"
 
@@ -63,10 +74,12 @@ final class BridgeController: ObservableObject {
         clipboardEnabled = state.clipboardEnabled
         otpEnabled = state.otpEnabled
         skipSensitive = state.skipSensitive ?? false
+        soundEnabled = state.soundEnabled ?? false
         isLoading = false
         otpPresenter.requestPermission()
         PairingStore.writePendingLink(nil)  // left over if the app quit while pairing
         watcher.onCopy = { [weak self] text, sensitive in self?.localCopy(text, sensitive: sensitive) }
+        watcher.onImageCopy = { [weak self] mime, data in self?.localImageCopy(mime: mime, data: data) }
         watcher.start()
         listener.start(
             port: Wire.defaultPort, name: macName,
@@ -186,7 +199,12 @@ final class BridgeController: ObservableObject {
                 guard established(session, peer) else { throw SessionError.authFailed }
                 peerId = peer.phoneId
                 while true {
-                    handle(try await session.receive(), from: session, phoneName: peer.name)
+                    let message = try await session.receive()
+                    if message.t == "image" {
+                        try await receiveImage(message, from: session, peer: peer)
+                    } else {
+                        handle(message, from: session, peer: peer)
+                    }
                 }
             } catch {
                 timeout.cancel()
@@ -247,14 +265,14 @@ final class BridgeController: ObservableObject {
         return true
     }
 
-    private func handle(_ message: Message, from session: PhoneSession, phoneName: String) {
+    private func handle(_ message: Message, from session: PhoneSession, peer: PhoneSession.Peer) {
         switch message.t {
         case "clip":
             guard clipboardEnabled, let text = message.text, !text.isEmpty,
                 text.utf8.count <= Wire.maxClipBytes
             else { return }
             // A timestamp from the future would block later copies; cap it at now.
-            let ts = min(message.ts ?? Self.now(), Self.now())
+            let ts = min(message.ts.map { $0 + peer.clockOffset } ?? Self.now(), Self.now())
             guard ts > clipTs else {
                 Log.app.info("clip from phone ignored (older than local)")
                 return
@@ -264,6 +282,7 @@ final class BridgeController: ObservableObject {
             guard text != pasteboardText else { return }
             watcher.write(text, sensitive: message.sensitive ?? false)
             pasteboardText = text
+            pasteboardImage = nil
             Log.app.info("clip from phone: \(text.utf8.count) bytes")
         case "otp":
             guard otpEnabled, let code = Sanitize.verificationCode(message.code) else { return }
@@ -277,6 +296,7 @@ final class BridgeController: ObservableObject {
             watcher.write(code, sensitive: true, thisMacOnly: true)
             clipTs = Self.now()
             pasteboardText = code
+            pasteboardImage = nil
             otpPresenter.present(code: code, sender: Sanitize.label(message.sender, maxLength: 40))
             Log.app.info("otp from phone")
         case "ping":
@@ -286,16 +306,54 @@ final class BridgeController: ObservableObject {
             // Answer first: drawing the banner would otherwise be counted as network delay.
             Task {
                 try? await session.send(Message(t: "tested", n: message.n))
-                otpPresenter.announce(title: "폰 연결 테스트", detail: "\(phoneName)에서 보낸 신호를 받았습니다")
+                otpPresenter.announce(title: "폰 연결 테스트", detail: "\(peer.name)에서 보낸 신호를 받았습니다")
             }
         default:
             break
         }
     }
 
+    /// Reads the raw records that follow an "image" record and puts the picture on the pasteboard.
+    private func receiveImage(
+        _ header: Message, from session: PhoneSession, peer: PhoneSession.Peer
+    ) async throws {
+        guard let size = header.size, size > 0, size <= Wire.maxImageBytes,
+            let mime = header.mime, Wire.imageTypes.contains(mime)
+        else { throw SessionError.malformed }
+        var data = Data(capacity: size)
+        while data.count < size {
+            let chunk = try await session.receiveData()
+            guard !chunk.isEmpty, data.count + chunk.count <= size else { throw SessionError.malformed }
+            data.append(chunk)
+        }
+        guard clipboardEnabled else { return }
+        let ts = min(header.ts.map { $0 + peer.clockOffset } ?? Self.now(), Self.now())
+        guard ts > clipTs else { return }
+        clipTs = ts
+        let digest = Data(SHA256.hash(data: data))
+        guard digest != pasteboardImage, watcher.writeImage(data, mime: mime) else { return }
+        pasteboardImage = digest
+        pasteboardText = nil
+        Log.app.info("image from phone: \(data.count) bytes")
+    }
+
+    private func localImageCopy(mime: String, data: Data) {
+        let digest = Data(SHA256.hash(data: data))
+        guard digest != pasteboardImage else { return }
+        pasteboardImage = digest
+        pasteboardText = nil
+        let clip = Clip(image: (mime, data), ts: Self.now())
+        localClip = clip
+        clipTs = clip.ts
+        guard clipboardEnabled else { return }
+        for session in sessions.values.joined() { send(clip, to: session) }
+        Log.app.info("local image copy: \(data.count) bytes -> \(self.sessions.count) phone(s)")
+    }
+
     private func localCopy(_ text: String, sensitive: Bool) {
         guard text != pasteboardText else { return }
         pasteboardText = text
+        pasteboardImage = nil
         if sensitive && skipSensitive {
             // Kept on this Mac. The older copy must not be delivered later in its place.
             localClip = nil
@@ -313,8 +371,12 @@ final class BridgeController: ObservableObject {
     private func send(_ clip: Clip, to session: PhoneSession) {
         Task {
             do {
-                try await session.send(
-                    Message(t: "clip", text: clip.text, sensitive: clip.sensitive, ts: clip.ts))
+                if let image = clip.image {
+                    try await session.sendImage(mime: image.mime, data: image.data, ts: clip.ts)
+                } else {
+                    try await session.send(
+                        Message(t: "clip", text: clip.text, sensitive: clip.sensitive, ts: clip.ts))
+                }
             } catch {
                 session.close()
             }
@@ -328,6 +390,7 @@ final class BridgeController: ObservableObject {
         state.clipboardEnabled = clipboardEnabled
         state.otpEnabled = otpEnabled
         state.skipSensitive = skipSensitive
+        state.soundEnabled = soundEnabled
         if phones != state.phones { phones = state.phones }
         PairingStore.save(state)
         refreshStatus()

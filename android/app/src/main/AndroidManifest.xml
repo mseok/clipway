@@ -110,6 +110,18 @@
             </intent-filter>
         </receiver>
 
+        <!-- Serves pictures received from a Mac. Not exported: an app can read a picture
+             only when the clipboard hands it over on paste. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.clips"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/clip_paths" />
+        </provider>
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
