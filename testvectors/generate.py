@@ -18,6 +18,10 @@ stored keys on that record, then answers {"t":"hello","name":..,"ts":..}.
 Pairing: the QR code carries a one-time psk. When a handshake is authenticated with
 it, both sides store pairingKey as the long-term psk for that phone and forget the QR
 key, so a copy of the QR code is worthless afterwards.
+
+Records: clip {text, sensitive, ts} both ways; otp {code, sender} and ping from the
+phone, pong from the Mac; test {n} from the phone is answered with tested {n} and shown
+on the Mac, which is how the phone app checks that phone -> Mac delivery works.
 """
 
 import base64

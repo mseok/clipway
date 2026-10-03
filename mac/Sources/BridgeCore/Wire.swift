@@ -46,7 +46,7 @@ public struct MacHello: Codable {
     }
 }
 
-/// One encrypted record. `t` is "hello", "clip", "otp", "ping" or "pong".
+/// One encrypted record. `t` is "hello", "clip", "otp", "ping", "pong", "test" or "tested".
 public struct Message: Codable, Equatable {
     public var t: String
     /// Phone id, sent in the phone's encrypted hello.
@@ -57,10 +57,13 @@ public struct Message: Codable, Equatable {
     public var ts: Int64?
     public var code: String?
     public var sender: String?
+    /// Number chosen by the phone for a connection test and echoed in the reply.
+    public var n: Int64?
 
     public init(
         t: String, id: String? = nil, name: String? = nil, text: String? = nil,
-        sensitive: Bool? = nil, ts: Int64? = nil, code: String? = nil, sender: String? = nil
+        sensitive: Bool? = nil, ts: Int64? = nil, code: String? = nil, sender: String? = nil,
+        n: Int64? = nil
     ) {
         self.t = t
         self.id = id
@@ -70,6 +73,7 @@ public struct Message: Codable, Equatable {
         self.ts = ts
         self.code = code
         self.sender = sender
+        self.n = n
     }
 }
 

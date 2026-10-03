@@ -11,6 +11,8 @@ struct StoredState: Codable {
     var phones: [PairedPhone] = []
     var clipboardEnabled = true
     var otpEnabled = true
+    /// Optional so that state files written before this setting existed still load.
+    var skipSensitive: Bool?
 }
 
 /// Persists pairings in ~/Library/Application Support/Clipway/state.json (0600).

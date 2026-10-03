@@ -6,6 +6,7 @@ Actions run in order on one connection:
   clip:<text>     send a clipboard text
   otp:<code>      send a verification code
   listen:<secs>   print messages received from the Mac for that long
+  test            send a connection test and print the Mac's answer
 """
 
 import argparse
@@ -102,6 +103,9 @@ def main() -> None:
             channel.send({"t": "clip", "text": value, "sensitive": False, "ts": int(time.time() * 1000)})
         elif kind == "otp":
             channel.send({"t": "otp", "code": value, "sender": "15881234"})
+        elif kind == "test":
+            channel.send({"t": "test", "n": 12345})
+            print("mac:", channel.receive())
         elif kind == "listen":
             deadline = time.time() + float(value)
             channel.sock.settimeout(0.2)
