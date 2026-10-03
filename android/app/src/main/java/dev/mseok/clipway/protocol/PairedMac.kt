@@ -65,7 +65,7 @@ data class PairedMac(
             if (psk.size != 32) return null
             val id = query.getValue("id")
             if (id.isEmpty() || id.length > 64 || id.any { it.isISOControl() }) return null
-            val name = query.getValue("name").filterNot { it.isISOControl() }.trim().take(Wire.MAX_NAME_LENGTH)
+            val name = cleanName(query.getValue("name"))
             if (name.isEmpty()) return null
             val port = query.getValue("port").toInt()
             if (port !in 1..65535) return null
@@ -77,6 +77,17 @@ data class PairedMac(
                 hosts = query.getValue("hosts").split(",").filter(::isPrivateIpv4).distinct().take(8),
             )
         }.getOrNull()
+
+        /**
+         * The name is shown in the pairing dialog, so it must not carry invisible characters
+         * (zero width, direction overrides, line separators) that make it look like another name.
+         */
+        fun cleanName(raw: String): String = raw.filter {
+            when (Character.getType(it).toByte()) {
+                Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR -> false
+                else -> true
+            }
+        }.trim().take(Wire.MAX_NAME_LENGTH)
 
         /** True for dotted IPv4 literals in private, carrier-grade NAT (Tailscale) or link-local ranges. */
         fun isPrivateIpv4(host: String): Boolean {

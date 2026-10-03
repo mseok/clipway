@@ -51,6 +51,10 @@ final class BridgeController: ObservableObject {
     private var recentCodes: [Date] = []
     private static let maxHandshakingPerPeer = 4
     private static let maxHandshaking = 64
+    private static let maxSessionsPerPhone = 4
+    /// The phone whose pairing was stored but which has not yet been seen using its new key.
+    private var unconfirmedPairing: String?
+    private var lastTestBanner = Date.distantPast
     private var pairingSignal: DispatchSourceSignal?
     private var terminateSignal: DispatchSourceSignal?
     /// Last text copied on this Mac since launch.
@@ -79,7 +83,9 @@ final class BridgeController: ObservableObject {
         otpPresenter.requestPermission()
         PairingStore.writePendingLink(nil)  // left over if the app quit while pairing
         watcher.onCopy = { [weak self] text, sensitive in self?.localCopy(text, sensitive: sensitive) }
-        watcher.onImageCopy = { [weak self] mime, data in self?.localImageCopy(mime: mime, data: data) }
+        watcher.onImageCopy = { [weak self] mime, data, sensitive in
+            self?.localImageCopy(mime: mime, data: data, sensitive: sensitive)
+        }
         watcher.start()
         listener.start(
             port: Wire.defaultPort, name: macName,
@@ -133,6 +139,7 @@ final class BridgeController: ObservableObject {
 
     func endPairing() {
         pendingPsk = nil
+        unconfirmedPairing = nil
         pairingLink = nil
         PairingStore.writePendingLink(nil)
         pendingExpiry?.cancel()
@@ -164,6 +171,15 @@ final class BridgeController: ObservableObject {
 
     // MARK: Sessions
 
+    /// A picture that is still arriving on one session.
+    private struct IncomingImage {
+        let mime: String
+        let size: Int
+        let sensitive: Bool
+        let ts: Int64?
+        var data = Data()
+    }
+
     private func accept(_ connection: NWConnection) {
         // Unauthenticated peers get little: only local networks may connect, only a few
         // handshakes run at once, and each has six seconds.
@@ -186,30 +202,59 @@ final class BridgeController: ObservableObject {
                 if !Task.isCancelled { connection.cancel() }
             }
             var peerId: String?
+            var pictureDeadline: Task<Void, Never>?
             do {
                 let peer: PhoneSession.Peer
                 do {
                     defer {
                         handshaking[address] = handshaking[address].flatMap { $0 > 1 ? $0 - 1 : nil }
                     }
-                    peer = try await session.handshake(
-                        macName: macName, clipTs: clipTs, candidates: candidates)
+                    peer = try await session.handshake(macName: macName, candidates: candidates)
                 }
                 timeout.cancel()
                 guard established(session, peer) else { throw SessionError.authFailed }
                 peerId = peer.phoneId
+                try await session.confirm(macName: macName, clipTs: clipTs)
+                deliverPending(to: session, peer: peer)
+
+                var incoming: IncomingImage?
                 while true {
-                    let message = try await session.receive()
-                    if message.t == "image" {
-                        try await receiveImage(message, from: session, peer: peer)
-                    } else {
+                    let record = try await session.receive()
+                    // The first record after a pairing shows that the phone has the new key.
+                    if peer.newPairingKey != nil, unconfirmedPairing == peer.phoneId { endPairing() }
+                    switch record {
+                    case .message(let message) where message.t == "image":
+                        guard let size = message.size, size > 0, size <= Wire.maxImageBytes,
+                            let mime = message.mime, Wire.imageTypes.contains(mime)
+                        else { throw SessionError.malformed }
+                        incoming = IncomingImage(
+                            mime: mime, size: size, sensitive: message.sensitive ?? false, ts: message.ts)
+                        // A picture that never completes must not sit in memory.
+                        pictureDeadline?.cancel()
+                        pictureDeadline = Task {
+                            try? await Task.sleep(for: .seconds(120))
+                            if !Task.isCancelled { connection.cancel() }
+                        }
+                    case .message(let message):
                         handle(message, from: session, peer: peer)
+                    case .chunk(let bytes):
+                        guard var image = incoming, !bytes.isEmpty, image.data.count + bytes.count <= image.size
+                        else { throw SessionError.malformed }
+                        image.data.append(bytes)
+                        if image.data.count < image.size {
+                            incoming = image
+                        } else {
+                            incoming = nil
+                            pictureDeadline?.cancel()
+                            apply(image, peer: peer)
+                        }
                     }
                 }
             } catch {
                 timeout.cancel()
                 Log.net.info("session ended: \(String(describing: error), privacy: .public)")
             }
+            pictureDeadline?.cancel()
             session.close()
             if let peerId {
                 sessions[peerId]?.removeAll { $0 === session }
@@ -243,43 +288,55 @@ final class BridgeController: ObservableObject {
     private func established(_ session: PhoneSession, _ peer: PhoneSession.Peer) -> Bool {
         if let newKey = peer.newPairingKey {
             guard peer.psk == pendingPsk else { return false }
-            // The QR code's key is used this once; from now on the phone must present
-            // the key derived from this handshake.
+            // From now on the phone must present the key derived from this handshake. The
+            // QR key stays valid until the phone is seen using the new one: if this Mac's
+            // answer is lost the phone can simply try again, instead of the two ending up
+            // with different keys.
+            sessions[peer.phoneId]?.forEach { $0.close() }
             state.phones.removeAll { $0.id == peer.phoneId }
             state.phones.append(PairedPhone(id: peer.phoneId, name: peer.name, psk: newKey))
-            endPairing()
+            unconfirmedPairing = peer.phoneId
             persist()
-            otpPresenter.announce(title: "새 폰이 페어링되었습니다", detail: peer.name)
+            otpPresenter.announce(
+                title: "새 폰이 페어링되었습니다",
+                detail: "\(peer.name) · 확인 코드 \(PairingCode.code(for: newKey))")
         } else {
             guard state.phones.contains(where: { $0.id == peer.phoneId && $0.psk == peer.psk })
             else { return false }
+            if unconfirmedPairing == peer.phoneId { endPairing() }
         }
-        sessions[peer.phoneId, default: []].append(session)
+        // A phone needs one session, briefly two. More than a few means it is not reading them.
+        var open = sessions[peer.phoneId, default: []]
+        while open.count >= Self.maxSessionsPerPhone { open.removeFirst().close() }
+        sessions[peer.phoneId] = open + [session]
         connected.insert(peer.phoneId)
         refreshStatus()
         Log.net.info("phone connected: \(peer.name, privacy: .public)")
-        // Deliver what was copied here while the phone was away.
-        if clipboardEnabled, let clip = localClip, clip.ts > min(peer.clipTs, Self.now()) {
-            send(clip, to: session)
-        }
         return true
+    }
+
+    /// Delivers what was copied here while the phone was away.
+    private func deliverPending(to session: PhoneSession, peer: PhoneSession.Peer) {
+        guard clipboardEnabled, let clip = localClip, clip.ts > peer.clipTs,
+            !(clip.sensitive && skipSensitive)
+        else { return }
+        send(clip, to: session)
     }
 
     private func handle(_ message: Message, from session: PhoneSession, peer: PhoneSession.Peer) {
         switch message.t {
         case "clip":
-            guard clipboardEnabled, let text = message.text, !text.isEmpty,
-                text.utf8.count <= Wire.maxClipBytes
+            guard let text = message.text, !text.isEmpty, text.utf8.count <= Wire.maxClipBytes
             else { return }
-            // A timestamp from the future would block later copies; cap it at now.
-            let ts = min(message.ts.map { $0 + peer.clockOffset } ?? Self.now(), Self.now())
+            let ts = Clock.translate(message.ts, offset: peer.clockOffset, now: Self.now()) ?? Self.now()
             guard ts > clipTs else {
                 Log.app.info("clip from phone ignored (older than local)")
                 return
             }
+            // Recorded even with sync off, so the phone does not offer it again at every connect.
             clipTs = ts
             // Already there (a repeated send, or another sync tool delivered it first).
-            guard text != pasteboardText else { return }
+            guard clipboardEnabled, text != pasteboardText else { return }
             watcher.write(text, sensitive: message.sensitive ?? false)
             pasteboardText = text
             pasteboardImage = nil
@@ -304,75 +361,76 @@ final class BridgeController: ObservableObject {
         case "test":
             // "연결 테스트" on the phone: confirm on both screens that phone -> Mac works.
             // Answer first: drawing the banner would otherwise be counted as network delay.
+            let showBanner = Date().timeIntervalSince(lastTestBanner) >= 1
+            if showBanner { lastTestBanner = Date() }
             Task {
                 try? await session.send(Message(t: "tested", n: message.n))
-                otpPresenter.announce(title: "폰 연결 테스트", detail: "\(peer.name)에서 보낸 신호를 받았습니다")
+                if showBanner {
+                    otpPresenter.announce(title: "폰 연결 테스트", detail: "\(peer.name)에서 보낸 신호를 받았습니다")
+                }
             }
         default:
             break
         }
     }
 
-    /// Reads the raw records that follow an "image" record and puts the picture on the pasteboard.
-    private func receiveImage(
-        _ header: Message, from session: PhoneSession, peer: PhoneSession.Peer
-    ) async throws {
-        guard let size = header.size, size > 0, size <= Wire.maxImageBytes,
-            let mime = header.mime, Wire.imageTypes.contains(mime)
-        else { throw SessionError.malformed }
-        var data = Data(capacity: size)
-        while data.count < size {
-            let chunk = try await session.receiveData()
-            guard !chunk.isEmpty, data.count + chunk.count <= size else { throw SessionError.malformed }
-            data.append(chunk)
-        }
-        guard clipboardEnabled else { return }
-        let ts = min(header.ts.map { $0 + peer.clockOffset } ?? Self.now(), Self.now())
+    private func apply(_ image: IncomingImage, peer: PhoneSession.Peer) {
+        let ts = Clock.translate(image.ts, offset: peer.clockOffset, now: Self.now()) ?? Self.now()
         guard ts > clipTs else { return }
         clipTs = ts
-        let digest = Data(SHA256.hash(data: data))
-        guard digest != pasteboardImage, watcher.writeImage(data, mime: mime) else { return }
+        guard clipboardEnabled else { return }
+        let digest = Data(SHA256.hash(data: image.data))
+        guard digest != pasteboardImage,
+            watcher.writeImage(image.data, mime: image.mime, sensitive: image.sensitive)
+        else { return }
         pasteboardImage = digest
         pasteboardText = nil
-        Log.app.info("image from phone: \(data.count) bytes")
+        Log.app.info("image from phone: \(image.data.count) bytes")
     }
 
-    private func localImageCopy(mime: String, data: Data) {
+    private func localImageCopy(mime: String, data: Data, sensitive: Bool) {
         let digest = Data(SHA256.hash(data: data))
         guard digest != pasteboardImage else { return }
         pasteboardImage = digest
         pasteboardText = nil
-        let clip = Clip(image: (mime, data), ts: Self.now())
-        localClip = clip
-        clipTs = clip.ts
-        guard clipboardEnabled else { return }
-        for session in sessions.values.joined() { send(clip, to: session) }
-        Log.app.info("local image copy: \(data.count) bytes -> \(self.sessions.count) phone(s)")
+        broadcast(Clip(image: (mime, data), sensitive: sensitive, ts: Self.now()))
+        Log.app.info("local image copy: \(data.count) bytes")
     }
 
     private func localCopy(_ text: String, sensitive: Bool) {
         guard text != pasteboardText else { return }
         pasteboardText = text
         pasteboardImage = nil
-        if sensitive && skipSensitive {
-            // Kept on this Mac. The older copy must not be delivered later in its place.
+        // Text full of characters that JSON has to escape can outgrow a record; such a
+        // copy stays here rather than making the phone drop the connection.
+        let fits = ((try? Wire.encode(Message(t: "clip", text: text, sensitive: sensitive, ts: 0)))?.count ?? .max)
+            <= Wire.maxFrame - 64
+        var clip = Clip(sensitive: sensitive, ts: Self.now())
+        clip.text = fits ? text : ""
+        broadcast(clip, sendable: fits)
+        Log.app.info("local copy: \(text.utf8.count) bytes")
+    }
+
+    /// Records a copy made on this Mac and sends it to the connected phones, unless it is
+    /// held back (sensitive and the option is on, or too large to send).
+    private func broadcast(_ clip: Clip, sendable: Bool = true) {
+        clipTs = clip.ts
+        guard sendable, !(clip.sensitive && skipSensitive) else {
+            // The older copy must not be delivered later in its place.
             localClip = nil
-            clipTs = Self.now()
             return
         }
-        let clip = Clip(text: text, sensitive: sensitive, ts: Self.now())
         localClip = clip
-        clipTs = clip.ts
         guard clipboardEnabled else { return }
         for session in sessions.values.joined() { send(clip, to: session) }
-        Log.app.info("local copy: \(text.utf8.count) bytes -> \(self.sessions.count) phone(s)")
     }
 
     private func send(_ clip: Clip, to session: PhoneSession) {
         Task {
             do {
                 if let image = clip.image {
-                    try await session.sendImage(mime: image.mime, data: image.data, ts: clip.ts)
+                    try await session.sendImage(
+                        mime: image.mime, data: image.data, sensitive: clip.sensitive, ts: clip.ts)
                 } else {
                     try await session.send(
                         Message(t: "clip", text: clip.text, sensitive: clip.sensitive, ts: clip.ts))

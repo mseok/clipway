@@ -1,6 +1,9 @@
 """Stand-in for the Android app, used to exercise the Mac app over a real socket.
 
-Run: uv run --with cryptography python tools/fake_phone.py --psk <b64> <actions...>
+Run: CLIPWAY_PSK=<base64 key> uv run --with cryptography python tools/fake_phone.py <actions...>
+
+The key is read from the environment, not from an argument, because arguments are
+visible to every user of the Mac. Received clipboard text is never printed, only its length.
 
 Actions run in order on one connection:
   clip:<text>     send a clipboard text
@@ -14,6 +17,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import socket
 import struct
 import time
@@ -75,14 +79,16 @@ class Channel:
         if message.get("t") == "image":
             data = b""
             while len(data) < message["size"]:
-                data += self.receive_raw()
+                record = self.receive_raw()
+                if record[:1] == b"\x00":  # a chunk; other records may come in between
+                    data += record[1:]
             message["data"] = data
         return message
 
-    def send_image(self, mime: str, data: bytes) -> None:
-        self.send({"t": "image", "mime": mime, "size": len(data), "ts": int(time.time() * 1000)})
+    def send_image(self, mime: str, data: bytes, **header) -> None:
+        self.send({"t": "image", "mime": mime, "size": len(data), "ts": int(time.time() * 1000), **header})
         for offset in range(0, len(data), IMAGE_CHUNK):
-            self.send_raw(data[offset : offset + IMAGE_CHUNK])
+            self.send_raw(b"\x00" + data[offset : offset + IMAGE_CHUNK])
 
 
 def connect(host: str, port: int, psk: bytes, phone_id: str, clip_ts: int) -> Channel:
@@ -111,13 +117,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=47823)
-    parser.add_argument("--psk", required=True, help="base64 pairing key")
     parser.add_argument("--phone-id", default="fake-phone")
     parser.add_argument("--clip-ts", type=int, default=0, help="ts reported in hello")
     parser.add_argument("actions", nargs="*")
     args = parser.parse_args()
 
-    channel = connect(args.host, args.port, base64.b64decode(args.psk), args.phone_id, args.clip_ts)
+    key = os.environ.get("CLIPWAY_PSK") or parser.error("set CLIPWAY_PSK to the base64 pairing key")
+    channel = connect(args.host, args.port, base64.b64decode(key), args.phone_id, args.clip_ts)
     for action in args.actions:
         kind, _, value = action.partition(":")
         if kind == "clip":
@@ -139,6 +145,8 @@ def main() -> None:
                     continue
                 if "data" in message:
                     message["data"] = f"<{len(message['data'])} bytes, sha256 {hashlib.sha256(message['data']).hexdigest()[:16]}>"
+                if "text" in message:
+                    message["text"] = f"<{len(message['text'])} chars>"
                 print("mac:", message)
             channel.sock.settimeout(5)
         else:

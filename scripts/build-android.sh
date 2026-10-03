@@ -9,11 +9,17 @@ cd "$CW_ROOT/android"
 # The signing key is created once and stays out of git. Keep android/clipway.jks and
 # android/keystore.properties: an update can only replace the app if it is signed with them.
 if [ ! -f keystore.properties ]; then
-  PASS="$(openssl rand -hex 16)"
-  keytool -genkeypair -keystore clipway.jks -alias clipway -keyalg RSA -keysize 2048 \
-    -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Clipway" 2>/dev/null
-  printf 'storeFile=clipway.jks\nkeyAlias=clipway\npassword=%s\n' "$PASS" > keystore.properties
-  chmod 600 keystore.properties clipway.jks
+  # Created private from the start, and the password goes to keytool through the
+  # environment so that it never appears in the process list.
+  (
+    umask 077
+    CLIPWAY_KEY_PASS="$(openssl rand -hex 16)"
+    export CLIPWAY_KEY_PASS
+    keytool -genkeypair -keystore clipway.jks -alias clipway -keyalg RSA -keysize 2048 \
+      -validity 10000 -storepass:env CLIPWAY_KEY_PASS -keypass:env CLIPWAY_KEY_PASS \
+      -dname "CN=Clipway" 2>/dev/null
+    printf 'storeFile=clipway.jks\nkeyAlias=clipway\npassword=%s\n' "$CLIPWAY_KEY_PASS" > keystore.properties
+  )
 fi
 
 "$CW_TOOLCHAIN/gradle/bin/gradle" -q testReleaseUnitTest assembleRelease

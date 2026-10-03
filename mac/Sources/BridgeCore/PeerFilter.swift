@@ -50,6 +50,9 @@ public enum PeerFilter {
     /// Key for per-peer limits: the IPv4 address, or the /64 of an IPv6 address (one host
     /// can use any number of addresses inside its /64).
     public static func bucket(_ bytes: [UInt8]) -> [UInt8] {
-        bytes.count == 16 ? Array(bytes[0..<8]) : bytes
+        guard bytes.count == 16 else { return bytes }
+        // An IPv4 peer reported in mapped form counts as that IPv4 address.
+        if Array(bytes[0..<12]) == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF] { return Array(bytes[12...]) }
+        return Array(bytes[0..<8])
     }
 }

@@ -48,8 +48,9 @@ adb devices                             # must list the phone as "device"
 `scripts/setup-toolchain.sh` in a checkout, then `. scripts/env.sh`).
 
 **"No route to host" although `ping <phone ip>` works.** macOS Local Network privacy
-is blocking adb. Either the person allows it under System Settings → Privacy &
-Security → Local Network, or you relay through the system Python, which is allowed:
+is blocking adb. This is a privacy setting of the person's Mac, so tell them and let them
+decide: they can allow adb under System Settings → Privacy & Security → Local Network,
+plug the phone in over USB instead, or agree that you relay through the system Python:
 
 ```sh
 /usr/bin/python3 tools/lan_relay.py <port>:<phone ip>:<port> &
@@ -92,8 +93,8 @@ that is already paired: unpair it on the phone first ("해제").
 
 ## 4. Shizuku (automatic copy detection)
 
-1. Install Shizuku from the Play Store (the person does this), or
-   `adb install` the APK from https://github.com/RikkaApps/Shizuku/releases.
+1. The person installs Shizuku from the Play Store. `setup-phone.sh` only starts a copy
+   that came from the Play Store, because its starter runs with shell privileges.
 2. In Clipway on the phone, tap "Shizuku 권한 허용", then "항상 허용".
    The app must then show "복사 자동 감지 … 켜짐".
 3. For Shizuku to come back after a reboot it has to be started once from the Shizuku
@@ -102,9 +103,11 @@ that is already paired: unpair it on the phone first ("해제").
    adb port changes and you must reconnect. After that Shizuku starts by itself at
    boot when the phone is on Wi-Fi.
 
-UI steps on the phone can be driven with `adb shell uiautomator dump` plus
-`adb shell input tap`. When you dump the notification shade, only read the nodes of
-the notification you need.
+Plain navigation on the phone can be driven with `adb shell uiautomator dump` plus
+`adb shell input tap`, if the person asked you to. Do not tap anything that asks for the
+person's consent: the Clipway pairing dialog, the Shizuku permission dialog, Android
+permission prompts. Those exist so that a person decides; ask them to tap. Do not read
+the notification shade: it shows other apps' notifications.
 
 ## 5. Verify
 
@@ -132,7 +135,8 @@ Mac shows a banner at the top right and copies the code.
 
 - Save the Mac clipboard before testing and restore it afterwards; tests overwrite
   the clipboard on both devices.
-- Do not print clipboard contents, pairing links or keys.
+- Do not print clipboard contents, pairing links or keys, and do not pass keys as
+  command-line arguments (`tools/fake_phone.py` reads `CLIPWAY_PSK` from the environment).
 - Ask before uninstalling other apps, rebooting the phone or changing phone settings.
 - Things only the person can do: unlock the phone, answer PIN or biometric prompts,
   receive an SMS, click "Open Anyway" if macOS blocked an app downloaded in a browser.

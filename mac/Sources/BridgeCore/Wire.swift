@@ -10,8 +10,12 @@ public enum Wire {
     public static let maxHandshakeFrame = 1024
     public static let maxNameLength = 64
     public static let maxClipBytes = 1024 * 1024
-    /// An image travels as an "image" record followed by raw records of this size.
+    /// A picture travels as an "image" record followed by chunk records: a zero byte, then
+    /// up to this many bytes. JSON records start with "{", so the two cannot be confused
+    /// and other records may come between the chunks.
     public static let imageChunk = 256 * 1024
+    /// Unsent bytes a session may have queued before it is dropped.
+    public static let maxBacklog = 48 * 1024 * 1024
     public static let maxImageBytes = 20 * 1024 * 1024
     public static let imageTypes: Set<String> = [
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif", "image/bmp",
@@ -94,7 +98,15 @@ public struct Message: Codable, Equatable {
 public enum Sanitize {
     /// Single-line display text from a peer: no control characters, bounded length.
     public static func label(_ value: String?, maxLength: Int = Wire.maxNameLength) -> String {
-        let cleaned = (value ?? "").unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        // Control and invisible format characters (zero width, direction overrides) and line
+        // separators are dropped. The scalar bound stops a "character" made of thousands of
+        // combining marks.
+        let unwanted = CharacterSet.controlCharacters.union(.newlines)
+            .union(CharacterSet(charactersIn: "\u{200B}"..."\u{200F}"))
+            .union(CharacterSet(charactersIn: "\u{202A}"..."\u{202E}"))
+            .union(CharacterSet(charactersIn: "\u{2060}"..."\u{2069}"))
+            .union(CharacterSet(charactersIn: "\u{FEFF}"))
+        let cleaned = (value ?? "").unicodeScalars.lazy.filter { !unwanted.contains($0) }.prefix(maxLength * 4)
         return String(String(String.UnicodeScalarView(cleaned)).prefix(maxLength))
             .trimmingCharacters(in: .whitespaces)
     }

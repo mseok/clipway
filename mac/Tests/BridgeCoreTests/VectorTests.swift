@@ -22,6 +22,7 @@ struct Vectors: Decodable {
     let phoneToMacKey: String
     let macToPhoneKey: String
     let pairingKey: String
+    let pairingCode: String
     let records: [Record]
 
     static func load() throws -> Vectors {
@@ -54,6 +55,7 @@ func keyBytes(_ key: SymmetricKey) -> Data { key.withUnsafeBytes { Data($0) } }
         #expect(keyBytes(keys.phoneToMac) == b64(v.phoneToMacKey))
         #expect(keyBytes(keys.macToPhone) == b64(v.macToPhoneKey))
         #expect(keys.pairingKey == b64(v.pairingKey))
+        #expect(PairingCode.code(for: keys.pairingKey) == v.pairingCode)
     }
 }
 
@@ -148,6 +150,7 @@ func keyBytes(_ key: SymmetricKey) -> Data { key.withUnsafeBytes { Data($0) } }
     let b: [UInt8] = [0xFE, 0x80, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9]
     #expect(PeerFilter.bucket(a) == PeerFilter.bucket(b))
     #expect(PeerFilter.bucket(ip(192, 168, 0, 75)) == ip(192, 168, 0, 75))
+    #expect(PeerFilter.bucket(mapped + ip(192, 168, 0, 75)) == ip(192, 168, 0, 75))
 }
 
 @Test func peerTextIsSanitized() {
@@ -160,4 +163,28 @@ func keyBytes(_ key: SymmetricKey) -> Data { key.withUnsafeBytes { Data($0) } }
     #expect(Sanitize.label("  Fold7\n\u{1B}[31m ") == "Fold7[31m")
     #expect(Sanitize.label(String(repeating: "가", count: 200)).count == Wire.maxNameLength)
     #expect(Sanitize.label(nil) == "")
+    // Invisible characters cannot make two names look alike; combining marks cannot hide megabytes.
+    #expect(Sanitize.label("Mac mini\u{200B}\u{202E}\u{2028}") == "Mac mini")
+    #expect(Sanitize.label("a" + String(repeating: "\u{0301}", count: 100_000)).unicodeScalars.count <= Wire.maxNameLength * 4)
+}
+
+@Test func peerTimestampsCannotOverflow() {
+    let now: Int64 = 1_791_000_000_000
+    // Values a hostile peer could put in "now" and "ts": none may trap, all are bounded.
+    for peerNow in [Int64.min, -1, 0, 1, now, Int64.max, Clock.maxTimestamp + 1] {
+        let offset = Clock.offset(peerNow: peerNow, localNow: now)
+        #expect(abs(offset) <= Clock.maxTimestamp)
+        for ts in [Int64.min, -1, 0, 1, now, Int64.max] {
+            if let translated = Clock.translate(ts, offset: offset, now: now) {
+                #expect(translated > 0 && translated <= now)
+            }
+        }
+    }
+    #expect(Clock.offset(peerNow: nil, localNow: now) == 0)
+    #expect(Clock.offset(peerNow: now + 4000, localNow: now) == -4000)
+    // A phone four seconds ahead: its copy from "now" lands at the Mac's now, an older one stays older.
+    #expect(Clock.translate(now + 4000, offset: -4000, now: now) == now)
+    #expect(Clock.translate(now + 1000, offset: -4000, now: now) == now - 3000)
+    #expect(Clock.translate(nil, offset: 0, now: now) == nil)
+    #expect(Clock.translate(Int64.max, offset: Int64.min, now: now) == nil)
 }

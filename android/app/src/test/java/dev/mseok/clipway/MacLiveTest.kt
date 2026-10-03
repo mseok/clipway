@@ -24,9 +24,9 @@ class MacLiveTest {
         val connection = open(Base64.getDecoder().decode(psk))
         connection.sendClip(Clip(System.getenv("CW_TEST_TEXT") ?: "from-kotlin", false, System.currentTimeMillis()))
         connection.send(JSONObject().put("t", "ping"))
-        var reply = connection.receive()
         // The Mac may first deliver a clip that was copied there earlier.
-        if (reply.getString("t") == "clip") reply = connection.receive()
+        var reply = (connection.receive() as MacConnection.Record.Message).json
+        if (reply.getString("t") == "clip") reply = (connection.receive() as MacConnection.Record.Message).json
         assertEquals("pong", reply.getString("t"))
         connection.close()
     }

@@ -66,6 +66,19 @@ object BridgeCrypto {
         return SessionKeys(okm.copyOfRange(0, 32), okm.copyOfRange(32, 64), okm.copyOfRange(64, 96))
     }
 
+    /**
+     * Four digits derived from the long-term pairing key. Both devices show it, so the
+     * person can see that the phone paired with their Mac and not with something else.
+     */
+    fun pairingCode(key: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").run {
+            update("clipway-code".toByteArray())
+            digest(key)
+        }
+        val value = digest.take(4).fold(0L) { acc, byte -> (acc shl 8) or (byte.toLong() and 0xFF) }
+        return "%04d".format(value % 10000)
+    }
+
     fun hkdf(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(salt, "HmacSHA256"))

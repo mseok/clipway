@@ -6,6 +6,8 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
 object Wire {
@@ -21,8 +23,38 @@ object Wire {
     /** Text longer than this is not synced; it also keeps binder transactions small. */
     const val MAX_CLIP_CHARS = 200_000
 
-    /** A picture travels as an "image" record followed by raw records of this size. */
+    /**
+     * A picture travels as an "image" record followed by chunk records: a zero byte, then
+     * up to this many bytes. JSON records start with "{", so the two cannot be confused
+     * and other records (a ping, a verification code) may come between the chunks.
+     */
     const val IMAGE_CHUNK = 256 * 1024
+
+    /** 2100-01-01 in milliseconds; anything later is not a real timestamp. */
+    const val MAX_TIMESTAMP = 4_102_444_800_000L
+
+    /** What to add to the Mac's timestamps to get this phone's time (0 if its clock is unusable). */
+    fun clockOffset(peerNow: Long, localNow: Long): Long =
+        if (peerNow in 1..MAX_TIMESTAMP && localNow in 1..MAX_TIMESTAMP) localNow - peerNow else 0L
+
+    /** A timestamp from the Mac on this phone's clock, never later than now; null if unusable. */
+    fun translate(ts: Long, offset: Long, now: Long): Long? =
+        if (ts in 1..MAX_TIMESTAMP && offset in -MAX_TIMESTAMP..MAX_TIMESTAMP) (ts + offset).coerceIn(1, now) else null
+
+    /** True when the bytes start like a file of the declared type. */
+    fun looksLike(mime: String, bytes: ByteArray): Boolean {
+        fun at(offset: Int, text: String) =
+            bytes.size >= offset + text.length && text.indices.all { bytes[offset + it] == text[it].code.toByte() }
+        return when (mime) {
+            "image/png" -> at(1, "PNG") && bytes[0] == 0x89.toByte()
+            "image/jpeg" -> bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()
+            "image/gif" -> at(0, "GIF8")
+            "image/webp" -> at(0, "RIFF") && at(8, "WEBP")
+            "image/bmp" -> at(0, "BM")
+            "image/heic", "image/heif" -> at(4, "ftyp")
+            else -> false
+        }
+    }
     const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
     val IMAGE_TYPES = mapOf(
         "image/png" to "png", "image/jpeg" to "jpg", "image/gif" to "gif", "image/webp" to "webp",
@@ -71,6 +103,13 @@ class MacConnection private constructor(
 ) {
     private val output = socket.getOutputStream()
     private var lastSentClipTs = 0L
+    private val clipOrder = Any()
+
+    sealed interface Record {
+        class Message(val json: JSONObject) : Record
+        /** Part of the picture announced by the last "image" message. */
+        class Chunk(val bytes: ByteArray) : Record
+    }
 
     @Synchronized
     fun send(message: JSONObject) {
@@ -84,9 +123,8 @@ class MacConnection private constructor(
     }
 
     /** Sends a clip once; repeated calls with the same or an older clip are ignored. */
-    @Synchronized
-    fun sendClip(clip: Clip) {
-        if (clip.ts <= lastSentClipTs) return
+    fun sendClip(clip: Clip) = synchronized(clipOrder) {
+        if (clip.ts <= lastSentClipTs) return@synchronized
         val image = clip.image
         if (image == null) {
             send(
@@ -97,48 +135,47 @@ class MacConnection private constructor(
                     .put("ts", clip.ts)
             )
         } else {
-            // Header and chunks go out under one lock, so no other record can come between them.
+            // Each chunk takes the write lock on its own: a ping or a verification code can
+            // go out between chunks instead of waiting for the whole picture.
             send(
-                JSONObject().put("t", "image").put("mime", image.mime)
-                    .put("size", image.bytes.size).put("ts", clip.ts)
+                JSONObject().put("t", "image").put("mime", image.mime).put("size", image.bytes.size)
+                    .put("sensitive", clip.sensitive).put("ts", clip.ts)
             )
-            try {
-                var offset = 0
-                while (offset < image.bytes.size) {
-                    val end = minOf(offset + Wire.IMAGE_CHUNK, image.bytes.size)
-                    Wire.writeFrame(output, sendCipher.seal(image.bytes.copyOfRange(offset, end)))
-                    offset = end
-                }
-            } catch (e: Exception) {
-                close()
-                throw e
+            var offset = 0
+            while (offset < image.bytes.size) {
+                val end = minOf(offset + Wire.IMAGE_CHUNK, image.bytes.size)
+                sendChunk(image.bytes, offset, end)
+                offset = end
             }
         }
         lastSentClipTs = clip.ts
     }
 
-    /** Reads the raw records that follow an "image" record. */
-    fun receiveImage(header: JSONObject): Clip.Image {
-        val size = header.optInt("size")
-        val mime = header.optString("mime")
-        if (size !in 1..Wire.MAX_IMAGE_BYTES || mime !in Wire.IMAGE_TYPES) throw IOException("bad image header")
-        val bytes = ByteArray(size)
-        var offset = 0
-        while (offset < size) {
-            val chunk = recvCipher.open(Wire.readFrame(input))
-            if (chunk.isEmpty() || offset + chunk.size > size) throw IOException("bad image record")
-            chunk.copyInto(bytes, offset)
-            offset += chunk.size
+    @Synchronized
+    private fun sendChunk(bytes: ByteArray, from: Int, to: Int) {
+        try {
+            val record = ByteArray(1 + to - from)
+            bytes.copyInto(record, 1, from, to)
+            Wire.writeFrame(output, sendCipher.seal(record))
+        } catch (e: Exception) {
+            close()
+            throw e
         }
-        return Clip.Image(mime, bytes)
     }
 
     fun sendOtp(code: String, sender: String) {
         send(JSONObject().put("t", "otp").put("code", code).put("sender", sender))
     }
 
-    /** Blocks until the next message; throws when the connection is lost or idle too long. */
-    fun receive(): JSONObject = JSONObject(String(recvCipher.open(Wire.readFrame(input))))
+    /** Blocks until the next record; throws when the connection is lost or idle too long. */
+    fun receive(): Record {
+        val plaintext = recvCipher.open(Wire.readFrame(input))
+        return if (plaintext.isNotEmpty() && plaintext[0] == 0.toByte()) {
+            Record.Chunk(plaintext.copyOfRange(1, plaintext.size))
+        } else {
+            Record.Message(JSONObject(String(plaintext)))
+        }
+    }
 
     fun close() {
         runCatching { socket.close() }
@@ -147,6 +184,10 @@ class MacConnection private constructor(
     companion object {
         private const val CONNECT_TIMEOUT_MS = 2500
         private const val HANDSHAKE_TIMEOUT_MS = 4000
+
+        /** The read timeout is per read; this bounds the whole handshake against a slow trickle. */
+        private const val HANDSHAKE_DEADLINE_MS = 8000L
+        private val watchdog = Executors.newSingleThreadScheduledExecutor { Thread(it, "clipway-deadline").apply { isDaemon = true } }
 
         /**
          * The phone pings every 10 s and the Mac answers, so 25 silent seconds mean the link
@@ -163,6 +204,7 @@ class MacConnection private constructor(
             clipTs: Long,
         ): MacConnection {
             val socket = Socket()
+            val deadline = watchdog.schedule({ runCatching { socket.close() } }, HANDSHAKE_DEADLINE_MS, TimeUnit.MILLISECONDS)
             try {
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
@@ -199,13 +241,14 @@ class MacConnection private constructor(
                 )
                 if (reply.optString("t") != "hello") throw IOException("unexpected reply")
 
+                if (!deadline.cancel(false)) throw IOException("handshake took too long")
                 socket.soTimeout = IDLE_TIMEOUT_MS
                 val now = System.currentTimeMillis()
-                val offset = if (reply.has("now")) now - reply.getLong("now") else 0L
-                val reported = reply.optLong("ts", 0)
-                val macClipTs = if (reported == 0L) 0L else (reported + offset).coerceAtMost(now)
+                val offset = Wire.clockOffset(reply.optLong("now", 0), now)
+                val macClipTs = Wire.translate(reply.optLong("ts", 0), offset, now) ?: 0L
                 return MacConnection(socket, input, sendCipher, recvCipher, macClipTs, keys.pairingKey, offset)
             } catch (e: Exception) {
+                deadline.cancel(false)
                 runCatching { socket.close() }
                 throw e
             }

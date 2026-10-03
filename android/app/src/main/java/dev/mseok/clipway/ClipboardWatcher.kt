@@ -15,7 +15,7 @@ import rikka.shizuku.Shizuku
 class ClipboardWatcher(
     private val context: Context,
     private val onCopy: (text: String, sensitive: Boolean) -> Unit,
-    private val onImage: (mime: String, bytes: ByteArray) -> Unit,
+    private val onImage: (mime: String, bytes: ByteArray, sensitive: Boolean) -> Unit,
 ) {
     enum class State { NOT_RUNNING, NO_PERMISSION, STARTING, WATCHING, FAILED }
 
@@ -34,13 +34,13 @@ class ClipboardWatcher(
             if (text != null) onCopy(text, sensitive)
         }
 
-        override fun onImageCopied(data: ParcelFileDescriptor?, mime: String?, size: Int) {
+        override fun onImageCopied(data: ParcelFileDescriptor?, mime: String?, size: Int, sensitive: Boolean) {
             if (data == null) return
             val bytes = runCatching {
                 ParcelFileDescriptor.AutoCloseInputStream(data).use { it.readNBytes(size.coerceIn(0, Wire.MAX_IMAGE_BYTES)) }
             }.getOrNull() ?: return
             if (mime != null && mime in Wire.IMAGE_TYPES && size in 1..Wire.MAX_IMAGE_BYTES && bytes.size == size) {
-                onImage(mime, bytes)
+                onImage(mime, bytes, sensitive)
             }
         }
     }

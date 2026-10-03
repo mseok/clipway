@@ -46,6 +46,19 @@ extension NWConnection {
     }
 }
 
+/// Bytes handed to the connection and not yet written out.
+final class Backlog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes = 0
+
+    func add(_ count: Int) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes += count
+        return bytes
+    }
+}
+
 /// One phone connection: plaintext hello exchange, then encrypted records.
 actor PhoneSession {
     struct Peer {
@@ -55,6 +68,8 @@ actor PhoneSession {
         let psk: Data
         /// Set when the handshake used the QR code's key: the key to store for this phone.
         let newPairingKey: Data?
+        /// The key to store for this phone: the stored one, or the new one after a pairing.
+        var storedKey: Data { newPairingKey ?? psk }
         /// When the phone's current clipboard content was copied (0 if unknown), on this Mac's clock.
         let clipTs: Int64
         /// Add this to a timestamp from the phone to get the time on this Mac's clock. The two
@@ -63,6 +78,7 @@ actor PhoneSession {
     }
 
     nonisolated let connection: NWConnection
+    private let backlog = Backlog()
     private var sendCipher: FrameCipher?
     private var recvCipher: FrameCipher?
 
@@ -79,7 +95,7 @@ actor PhoneSession {
 
     /// The phone proves which pairing it holds by encrypting its hello; the plaintext
     /// part of the handshake names neither device.
-    func handshake(macName: String, clipTs: Int64, candidates: [Candidate]) async throws -> Peer {
+    func handshake(macName: String, candidates: [Candidate]) async throws -> Peer {
         guard !candidates.isEmpty else { throw SessionError.unknownPeer }
         let phoneHelloBytes = try await readFrame(limit: Wire.maxHandshakeFrame)
         let hello = try JSONDecoder().decode(PhoneHello.self, from: phoneHelloBytes)
@@ -108,30 +124,37 @@ actor PhoneSession {
             else { throw SessionError.malformed }
             recvCipher = cipher
             sendCipher = FrameCipher(key: keys.macToPhone)
+            // The Mac's hello is sent by `confirm`, once the controller has accepted the
+            // key. A phone therefore never sees a hello for a pairing the Mac refused.
             let now = Int64(Date().timeIntervalSince1970 * 1000)
-            try send(Message(t: "hello", name: macName, ts: clipTs, now: now))
             let name = Sanitize.label(message.name)
-            let offset = message.now.map { now - $0 } ?? 0
+            let offset = Clock.offset(peerNow: message.now, localNow: now)
             return Peer(
                 phoneId: phoneId, name: name.isEmpty ? "Android" : name, psk: candidate.psk,
                 newPairingKey: candidate.phoneId == nil ? keys.pairingKey : nil,
-                clipTs: message.ts.map { $0 == 0 ? 0 : $0 + offset } ?? 0, clockOffset: offset)
+                clipTs: Clock.translate(message.ts, offset: offset, now: now) ?? 0, clockOffset: offset)
         }
         throw SessionError.authFailed
     }
 
-    func receive() async throws -> Message {
+    /// Completes the handshake after the controller has accepted the key.
+    func confirm(macName: String, clipTs: Int64) throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try send(Message(t: "hello", name: macName, ts: clipTs, now: now))
+    }
+
+    enum Record {
+        case message(Message)
+        /// Part of the picture announced by the last "image" message.
+        case chunk(Data)
+    }
+
+    func receive() async throws -> Record {
         let sealed = try await readFrame()
         guard recvCipher != nil else { throw SessionError.malformed }
         let plaintext = try recvCipher!.open(sealed)
-        return try JSONDecoder().decode(Message.self, from: plaintext)
-    }
-
-    /// The raw bytes of one record, for the records that follow an "image" record.
-    func receiveData() async throws -> Data {
-        let sealed = try await readFrame()
-        guard recvCipher != nil else { throw SessionError.malformed }
-        return try recvCipher!.open(sealed)
+        if plaintext.first == 0 { return .chunk(plaintext.dropFirst()) }
+        return .message(try JSONDecoder().decode(Message.self, from: plaintext))
     }
 
     /// Seals and enqueues in one step on the actor, so records reach the connection in
@@ -140,23 +163,28 @@ actor PhoneSession {
         try sendRecord(Wire.encode(message))
     }
 
-    /// The header and every chunk are enqueued in this one call, so nothing can come between them.
-    func sendImage(mime: String, data: Data, ts: Int64) throws {
-        try send(Message(t: "image", ts: ts, mime: mime, size: data.count))
+    func sendImage(mime: String, data: Data, sensitive: Bool, ts: Int64) throws {
+        try send(Message(t: "image", sensitive: sensitive, ts: ts, mime: mime, size: data.count))
         var offset = data.startIndex
         while offset < data.endIndex {
             let end = min(offset + Wire.imageChunk, data.endIndex)
-            try sendRecord(data[offset..<end])
+            try sendRecord(Data([0]) + data[offset..<end])
             offset = end
         }
     }
 
     private func sendRecord(_ plaintext: Data) throws {
         guard sendCipher != nil else { throw SessionError.malformed }
+        // A phone that stops reading must not make this Mac queue without limit.
+        guard backlog.add(plaintext.count) <= Wire.maxBacklog else {
+            connection.cancel()
+            throw SessionError.closed
+        }
         let sealed = try sendCipher!.seal(plaintext)
         connection.send(
             content: Wire.frame(sealed),
-            completion: .contentProcessed { [connection] error in
+            completion: .contentProcessed { [connection, backlog] error in
+                _ = backlog.add(-plaintext.count)
                 if error != nil { connection.cancel() }
             })
     }

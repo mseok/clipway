@@ -1,7 +1,7 @@
 # Notes for coding agents
 
-Clipway syncs clipboard text and SMS verification codes between an Android phone and
-a Mac. `mac/` is a SwiftPM menu bar app, `android/` a Kotlin app; they share the
+Clipway syncs clipboard text, copied pictures and SMS verification codes between an
+Android phone and a Mac. `mac/` is a SwiftPM menu bar app, `android/` a Kotlin app; they share the
 protocol described in `testvectors/generate.py`.
 
 - Installing Clipway for someone: follow [docs/agent-setup.md](docs/agent-setup.md).
@@ -13,5 +13,8 @@ protocol described in `testvectors/generate.py`.
   when the protocol changes.
 - `tools/fake_phone.py` stands in for the phone when testing the Mac app.
 - Never log clipboard contents or pairing keys. Existing logs print lengths only.
+- Values from the other device are untrusted even after pairing: bound them before
+  arithmetic (Swift traps on overflow), check sizes and types, and never let one bad
+  record end the process.
 - The Android signing key (`android/*.jks`, `android/keystore.properties`) is not in
   git and must be kept: updates have to be signed with the same key.
