@@ -124,6 +124,12 @@ final class BridgeController: ObservableObject {
                 symbol: "arrow.down.circle")
         }
         updater.start()
+        // A menu bar app opens no window, so a first launch would look like nothing happened.
+        if state.phones.isEmpty {
+            otpPresenter.announce(
+                title: "Clipway가 메뉴바에서 실행 중입니다", detail: "메뉴바의 폰 아이콘을 눌러 폰을 연결하세요",
+                symbol: "menubar.arrow.up.rectangle")
+        }
 
         // `pkill` and installs send SIGTERM; quit through AppKit so sessions are closed.
         signal(SIGTERM, SIG_IGN)

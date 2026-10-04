@@ -68,8 +68,8 @@ scripts/setup-phone.sh [path/to/Clipway-android.apk]
 ```
 
 It installs the APK, grants the notification and SMS permissions, exempts the app
-from battery optimisation, starts Shizuku if it is installed but not running,
-launches the app and pairs it with the Clipway app running on this Mac.
+from battery optimisation, installs Shizuku if it is missing and starts it if it is not
+running, launches the app and pairs it with the Clipway app running on this Mac.
 
 Pairing by hand, without the QR code:
 
@@ -93,8 +93,10 @@ that is already paired: unpair it on the phone first ("해제").
 
 ## 4. Shizuku (automatic copy detection)
 
-1. The person installs Shizuku from the Play Store. `setup-phone.sh` only starts a copy
-   that came from the Play Store, because its starter runs with shell privileges.
+1. `setup-phone.sh` installs Shizuku if the phone does not have it: the official release
+   from its GitHub page, checked against a pinned hash. The phone app offers the same
+   install ("Shizuku 설치"). The script only starts a copy that is this pinned release or
+   came from the Play Store, because Shizuku's starter runs with shell privileges.
 2. In Clipway on the phone, tap "Shizuku 권한 허용", then "항상 허용".
    The app must then show "복사 자동 감지 … 켜짐".
 3. For Shizuku to come back after a reboot it has to be started once from the Shizuku

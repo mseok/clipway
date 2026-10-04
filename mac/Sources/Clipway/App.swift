@@ -31,6 +31,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PanelView: View {
     @EnvironmentObject private var controller: BridgeController
     @EnvironmentObject private var updater: Updater
+    @State private var showPhoneApp = false
+
+    /// Always the newest release's APK, for the phone's camera to open.
+    private static let phoneAppLink = "https://github.com/mseok/clipway/releases/latest/download/Clipway-android.apk"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -39,9 +43,12 @@ struct PanelView: View {
                 Spacer()
                 Text(controller.status).font(.caption).foregroundStyle(.secondary)
             }
-            if controller.phones.isEmpty {
-                Text("페어링된 폰이 없습니다.").font(.callout).foregroundStyle(.secondary)
+            if !Updater.installed, Bundle.main.bundleURL.pathExtension == "app" {
+                Text("Clipway를 응용 프로그램 폴더로 옮긴 뒤 다시 열어 주세요. 지금 위치에서는 업데이트를 받을 수 없습니다.")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            if controller.phones.isEmpty { firstSteps }
             ForEach(controller.phones) { phone in
                 HStack(spacing: 8) {
                     Circle()
@@ -89,6 +96,31 @@ struct PanelView: View {
         .controlSize(.small)
         .padding(14)
         .frame(width: 300)
+    }
+
+    /// Shown until a phone is paired.
+    @ViewBuilder private var firstSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("1. 폰에 Clipway 앱을 설치합니다.")
+            if showPhoneApp, let image = QRCode.image(for: Self.phoneAppLink) {
+                VStack(spacing: 6) {
+                    Image(nsImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 160, height: 160)
+                        .padding(8)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text("폰 카메라로 스캔하면 설치 파일을 내려받습니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            Button(showPhoneApp ? "QR 닫기" : "폰 앱 받기 (QR)") { showPhoneApp.toggle() }
+            Text("2. 아래 '새 폰 페어링'을 누르고, 폰 앱의 'Mac 추가'로 QR을 스캔합니다.")
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var update: some View {

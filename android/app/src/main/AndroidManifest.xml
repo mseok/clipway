@@ -11,7 +11,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Lets the app hide other apps' overlays while its screen (the pairing dialog) is up. -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
-    <!-- Updates: the app downloads its own newer APK and hands it to the system installer. -->
+    <!-- The app downloads its own newer APK, and Shizuku on request, and hands them to
+         the system installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
@@ -109,7 +110,7 @@
             </intent-filter>
         </receiver>
 
-        <receiver android:name=".UpdateReceiver" android:exported="false" />
+        <receiver android:name=".InstallReceiver" android:exported="false" />
 
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
