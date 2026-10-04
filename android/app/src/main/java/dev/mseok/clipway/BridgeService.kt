@@ -62,6 +62,7 @@ class BridgeService : Service() {
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
 
         bridge.watcher.start()
+        (application as BridgeApp).updater.start()
         bridge.setInteractive(getSystemService(PowerManager::class.java).isInteractive)
 
         statusJob = bridge.scope.launch {

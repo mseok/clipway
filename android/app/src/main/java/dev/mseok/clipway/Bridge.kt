@@ -47,6 +47,7 @@ import org.json.JSONObject
 
 class BridgeApp : Application() {
     val bridge: Bridge by lazy { Bridge(this) }
+    val updater: Updater by lazy { Updater(this, bridge.scope) }
 
     /** A scanned or received pairing link that waits for the user's confirmation. */
     val pendingPairing = MutableStateFlow<PairingRequest?>(null)

@@ -38,8 +38,8 @@ final class OTPPresenter: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// Banner for events the user should notice even without Notification Center access.
-    func announce(title: String, detail: String) {
-        showBanner(title: title, detail: detail, symbol: "iphone.badge.checkmark")
+    func announce(title: String, detail: String, symbol: String = "iphone.badge.checkmark") {
+        showBanner(title: title, detail: detail, symbol: symbol)
     }
 
     private func showBanner(title: String, detail: String, symbol: String = "key.fill") {

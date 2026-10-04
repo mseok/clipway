@@ -18,6 +18,8 @@ __pycache__/
 
 # release files
 /dist/
+# signs release.json; the public half is in mac/Sources/BridgeCore/Release.swift
+/release.key
 
 # local task handoff (not part of the project)
 /task-state.json
