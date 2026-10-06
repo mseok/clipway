@@ -13,6 +13,17 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/Clipway"
 cp Info.plist "$APP/Contents/Info.plist"
+
+# The icon is drawn once, in assets/icon.svg; sips renders the sizes macOS wants.
+ICONSET="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET" "$APP/Contents/Resources"
+for size in 16 32 128 256 512; do
+  sips -s format png -z $size $size ../assets/icon.svg --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -s format png -z $((size * 2)) $((size * 2)) ../assets/icon.svg --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$(dirname "$ICONSET")"
+
 # The version comes from the VERSION file at the top of the repository, like the APK's.
 VERSION="$(tr -d '[:space:]' < ../VERSION)"
 IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"

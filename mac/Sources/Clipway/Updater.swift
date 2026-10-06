@@ -4,7 +4,7 @@ import CryptoKit
 import Foundation
 
 enum UpdateError: Error {
-    case unreachable
+    case unavailable
     case notSigned
     case damaged
     case notInstalled
@@ -90,7 +90,11 @@ final class Updater: ObservableObject {
             // An update that is already on offer stays on offer.
             guard userInitiated else { return }
             if case .available = phase { return }
-            phase = .failed("업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요.")
+            // Only a failed connection is the network's fault; anything else came from the server.
+            phase = .failed(
+                error is URLError
+                    ? "업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요."
+                    : "업데이트 정보를 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
         }
     }
 
@@ -172,10 +176,10 @@ final class Updater: ObservableObject {
         let (bytes, response) = try await session.bytes(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
             response.expectedContentLength <= Int64(limit)
-        else { throw UpdateError.unreachable }
+        else { throw UpdateError.unavailable }
         var data = Data()
         for try await byte in bytes {
-            guard data.count < limit else { throw UpdateError.unreachable }
+            guard data.count < limit else { throw UpdateError.unavailable }
             data.append(byte)
         }
         return data
@@ -187,8 +191,10 @@ final class Updater: ObservableObject {
             return "Clipway를 응용 프로그램 폴더로 옮긴 뒤 다시 실행하면 업데이트할 수 있습니다."
         case UpdateError.damaged, UpdateError.notSigned:
             return "내려받은 파일이 릴리스와 다릅니다. 잠시 후 다시 시도해 주세요."
-        case UpdateError.unreachable, is URLError:
+        case is URLError:
             return "업데이트를 내려받지 못했습니다. 인터넷 연결을 확인해 주세요."
+        case UpdateError.unavailable:
+            return "업데이트를 내려받지 못했습니다. 잠시 후 다시 시도해 주세요."
         default:
             return "업데이트를 설치하지 못했습니다. 응용 프로그램 폴더에 쓸 수 있는지 확인해 주세요."
         }

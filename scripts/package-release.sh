@@ -31,6 +31,20 @@ ditto -c -k --keepParent mac/dist/Clipway.app dist/Clipway-mac.zip
 STAGE="$(mktemp -d)"
 cp -R mac/dist/Clipway.app "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+# The app is not notarised, so macOS refuses the first launch and hides the way past that
+# in System Settings. This shortcut opens the right pane ("그래도 열기" is at its bottom).
+SHORTCUT="$STAGE/열리지 않으면 누르세요.inetloc"
+cat > "$SHORTCUT" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>URL</key>
+	<string>x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Security</string>
+</dict>
+</plist>
+PLIST
+SetFile -a E "$SHORTCUT"  # hide the extension
 hdiutil create -quiet -volname Clipway -srcfolder "$STAGE" -ov -format UDZO dist/Clipway.dmg
 rm -rf "$STAGE"
 
