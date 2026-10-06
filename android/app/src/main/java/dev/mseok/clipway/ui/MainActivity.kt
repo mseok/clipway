@@ -60,8 +60,10 @@ import dev.mseok.clipway.BridgeApp
 import dev.mseok.clipway.BridgeService
 import dev.mseok.clipway.BuildConfig
 import dev.mseok.clipway.ClipboardWatcher
+import dev.mseok.clipway.InstallState
 import dev.mseok.clipway.LinkTest
 import dev.mseok.clipway.PairingRequest
+import dev.mseok.clipway.ShizukuInstall
 import dev.mseok.clipway.Updater
 import dev.mseok.clipway.protocol.PairedMac
 import kotlinx.coroutines.Dispatchers
@@ -70,14 +72,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+data class Permissions(val notifications: Boolean, val sms: Boolean, val battery: Boolean) {
+    val complete get() = notifications && sms && battery
+}
 
-data class Permissions(val notifications: Boolean, val sms: Boolean, val battery: Boolean)
+/** What the phone already has of the things automatic copy detection needs. */
+data class ShizukuSetup(val installed: Boolean, val developerOptions: Boolean)
 
 class MainActivity : ComponentActivity() {
     private val bridge get() = (application as BridgeApp).bridge
     private val updater get() = (application as BridgeApp).updater
+    private val shizukuInstall get() = (application as BridgeApp).shizukuInstall
     private val permissions = MutableStateFlow(Permissions(false, false, false))
+    private val shizukuSetup = MutableStateFlow(ShizukuSetup(installed = false, developerOptions = false))
     private val testResults = MutableStateFlow<List<LinkTest>?>(null)
     private val testing = MutableStateFlow(false)
     private val checkingUpdate = MutableStateFlow(false)
@@ -123,6 +130,11 @@ class MainActivity : ComponentActivity() {
             notifications = granted(Manifest.permission.POST_NOTIFICATIONS),
             sms = granted(Manifest.permission.RECEIVE_SMS),
             battery = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName),
+        )
+        shizukuSetup.value = ShizukuSetup(
+            installed = runCatching { packageManager.getPackageInfo(ShizukuInstall.PACKAGE, 0) }.isSuccess,
+            developerOptions =
+                Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 1,
         )
     }
 
@@ -199,9 +211,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openShizuku() {
-        val launch = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
-            ?: Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$SHIZUKU_PACKAGE"))
-        runCatching { startActivity(launch) }.onFailure { toast("Play 스토어에서 Shizuku를 설치해 주세요") }
+        val launch = packageManager.getLaunchIntentForPackage(ShizukuInstall.PACKAGE)
+        if (launch == null) refreshPermissions() else runCatching { startActivity(launch) }
+    }
+
+    private fun openSettings(action: String) {
+        runCatching { startActivity(Intent(action)) }
+            .onFailure { runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) } }
     }
 
     @Composable
@@ -217,8 +233,13 @@ class MainActivity : ComponentActivity() {
         val pairing by pendingPairing.collectAsState()
         val results by testResults.collectAsState()
         val busy by testing.collectAsState()
-        val update by updater.state.collectAsState()
+        val release by updater.available.collectAsState()
+        val updating by updater.installer.state.collectAsState()
         val checking by checkingUpdate.collectAsState()
+        val shizuku by shizukuSetup.collectAsState()
+        val installingShizuku by shizukuInstall.installer.state.collectAsState()
+        // The installer finishing is the moment Shizuku appears.
+        LaunchedEffect(installingShizuku) { refreshPermissions() }
 
         results?.let { list ->
             AlertDialog(
@@ -319,24 +340,16 @@ class MainActivity : ComponentActivity() {
         ) {
             Text("Clipway", style = MaterialTheme.typography.headlineSmall)
 
-            when (val current = update) {
-                Updater.State.Idle -> Unit
-                is Updater.State.Available -> Section("업데이트") {
-                    Text("새 버전 ${current.release.version}이 있습니다. (지금 ${BuildConfig.VERSION_NAME})")
-                    Button(onClick = updater::install) { Text("업데이트") }
-                }
-                is Updater.State.Downloading -> Section("업데이트") {
-                    Text("새 버전을 내려받는 중… ${current.percent}%")
-                }
-                is Updater.State.Confirming -> Section("업데이트") {
-                    Text("설치 확인 창에서 '업데이트'를 눌러 주세요.")
-                    Button(onClick = { runCatching { startActivity(current.confirm) } }) { Text("설치 확인 창 열기") }
-                }
-                is Updater.State.Failed -> Section("업데이트") {
-                    Text(current.message)
-                    OutlinedButton(onClick = ::checkForUpdate, enabled = !checking) { Text("다시 시도") }
+            release?.let { offered ->
+                Section("업데이트") {
+                    Text("새 버전 ${offered.version}이 있습니다. (지금 ${BuildConfig.VERSION_NAME})")
+                    if (updating == InstallState.Idle) Button(onClick = updater::install) { Text("업데이트") }
+                    InstallProgress(updating, retry = updater::install)
                 }
             }
+
+            // Whatever still needs doing comes first.
+            if (!granted.complete) PermissionSection(granted)
 
             Section("Mac") {
                 if (macs.isEmpty()) Text("Mac 메뉴바의 Clipway에서 '새 폰 페어링'을 눌러 QR을 띄운 뒤 스캔하세요.")
@@ -374,9 +387,42 @@ class MainActivity : ComponentActivity() {
                         Text("Shizuku 사용 권한이 필요합니다.")
                         Button(onClick = { bridge.watcher.requestPermission() }) { Text("Shizuku 권한 허용") }
                     }
-                    ClipboardWatcher.State.NOT_RUNNING -> {
-                        Text("Shizuku가 실행 중이 아닙니다. 폰을 재부팅했다면 Shizuku 앱에서 다시 시작해 주세요. 그동안은 빠른 설정 타일이나 공유 메뉴로 보낼 수 있습니다.")
-                        OutlinedButton(onClick = ::openShizuku) { Text("Shizuku 열기") }
+                    ClipboardWatcher.State.NOT_RUNNING -> if (!shizuku.installed) {
+                        Text(
+                            "폰에서 복사한 것을 자동으로 보내려면 Shizuku 앱이 필요합니다. " +
+                                "없어도 빠른 설정 타일이나 공유 메뉴로 보낼 수 있습니다."
+                        )
+                        if (installingShizuku == InstallState.Idle) {
+                            Button(onClick = shizukuInstall::install) { Text("Shizuku 설치") }
+                        }
+                        InstallProgress(installingShizuku, retry = shizukuInstall::install)
+                    } else {
+                        Text("Shizuku를 시작하면 켜집니다. 처음 한 번만 하면 되고, 그동안은 타일이나 공유 메뉴로 보낼 수 있습니다.")
+                        if (!shizuku.developerOptions) {
+                            Step(1, "개발자 옵션을 켭니다. 소프트웨어 정보에서 '빌드번호'를 7번 누르세요.")
+                            OutlinedButton(onClick = { openSettings(Settings.ACTION_DEVICE_INFO_SETTINGS) }) {
+                                Text("휴대전화 정보 열기")
+                            }
+                        } else {
+                            Step(1, "개발자 옵션이 켜져 있습니다.", done = true)
+                        }
+                        Step(2, "Shizuku 앱의 '무선 디버깅으로 시작'에서 '페어링'을 누릅니다.")
+                        Step(3, "개발자 옵션 → 무선 디버깅 → '페어링 코드로 기기 페어링'에 나온 숫자를 Shizuku 알림에 입력합니다.")
+                        Step(4, "Shizuku 앱으로 돌아가 '시작'을 누릅니다.")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = ::openShizuku) { Text("Shizuku 열기") }
+                            if (shizuku.developerOptions) {
+                                OutlinedButton(
+                                    onClick = { openSettings(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS) }
+                                ) { Text("개발자 옵션 열기") }
+                            }
+                        }
+                        Text(
+                            "한 번 이렇게 시작해 두면 재부팅 뒤에도 Wi-Fi에 연결되면 스스로 시작합니다. " +
+                                "켜지지 않았다면 Shizuku 앱에서 '시작'만 다시 누르면 됩니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     ClipboardWatcher.State.FAILED -> {
                         Text("감시를 시작하지 못했습니다.")
@@ -396,19 +442,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            Section("권한") {
-                PermissionRow("알림", granted.notifications) {
-                    requestPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                }
-                PermissionRow("문자 수신 (인증번호)", granted.sms) {
-                    requestPermission.launch(Manifest.permission.RECEIVE_SMS)
-                }
-                PermissionRow("배터리 제한 없음", granted.battery) {
-                    startActivity(
-                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-                    )
-                }
-            }
+            if (granted.complete) PermissionSection(granted)
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -421,6 +455,49 @@ class MainActivity : ComponentActivity() {
                     Text(if (checking) "확인하는 중…" else "업데이트 확인")
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun PermissionSection(granted: Permissions) {
+        Section("권한") {
+            if (!granted.complete) Text("아래 세 가지를 허용해야 연결이 유지되고 인증번호가 전달됩니다.")
+            PermissionRow("알림", granted.notifications) {
+                requestPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            PermissionRow("문자 수신 (인증번호)", granted.sms) {
+                requestPermission.launch(Manifest.permission.RECEIVE_SMS)
+            }
+            PermissionRow("배터리 제한 없음", granted.battery) {
+                startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                )
+            }
+        }
+    }
+
+    /** Download progress, the system's confirmation, or what went wrong. Nothing when idle. */
+    @Composable
+    private fun InstallProgress(state: InstallState, retry: () -> Unit) {
+        when (state) {
+            InstallState.Idle -> Unit
+            is InstallState.Downloading -> Text("내려받는 중… ${state.percent}%")
+            is InstallState.Confirming -> {
+                Text("설치 확인 창에서 설치를 눌러 주세요.")
+                Button(onClick = { runCatching { startActivity(state.confirm) } }) { Text("설치 확인 창 열기") }
+            }
+            is InstallState.Failed -> {
+                Text(state.message)
+                OutlinedButton(onClick = retry) { Text("다시 시도") }
+            }
+        }
+    }
+
+    @Composable
+    private fun Step(number: Int, text: String, done: Boolean = false) {
+        Row {
+            Text(if (done) "✓" else "$number.", Modifier.width(24.dp))
+            Text(text, color = if (done) MaterialTheme.colorScheme.onSurfaceVariant else Color.Unspecified)
         }
     }
 

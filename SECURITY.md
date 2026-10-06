@@ -35,6 +35,9 @@ reproduce.
   the running one. On Android the system installer only accepts an APK signed with the
   same key as the installed app, and refuses downgrades.
 
+- A substituted Shizuku download. The copy that the phone app or `setup-phone.sh` installs
+  is one fixed release, checked against a hash built into Clipway before it is installed.
+
 ## What it does not defend against
 
 - Someone who obtains the pairing QR code while it is on screen and uses it before or

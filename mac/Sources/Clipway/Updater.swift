@@ -43,6 +43,14 @@ final class Updater: ObservableObject {
     }()
     private var schedule: Task<Void, Never>?
 
+    /// False when the app was started from the disk image or straight from the download
+    /// folder: it then sits on a read-only volume and cannot be replaced.
+    static let installed: Bool = {
+        let app = Bundle.main.bundleURL
+        return app.pathExtension == "app" && !app.path.contains("/AppTranslocation/")
+            && FileManager.default.isWritableFile(atPath: app.deletingLastPathComponent().path)
+    }()
+
     /// Checks shortly after launch and then once a day.
     func start() {
         schedule = Task {
@@ -108,11 +116,7 @@ final class Updater: ObservableObject {
 
     private func replaceApp(with release: ReleaseManifest) async throws {
         let app = Bundle.main.bundleURL
-        // Started from the disk image or straight from the download folder, the app sits
-        // on a read-only volume and there is nothing to replace.
-        guard app.pathExtension == "app", !app.path.contains("/AppTranslocation/"),
-            FileManager.default.isWritableFile(atPath: app.deletingLastPathComponent().path)
-        else { throw UpdateError.notInstalled }
+        guard Self.installed else { throw UpdateError.notInstalled }
 
         let archive = try await fetch(
             releases.appending(path: "download/v\(release.version)/\(release.mac.file)"),

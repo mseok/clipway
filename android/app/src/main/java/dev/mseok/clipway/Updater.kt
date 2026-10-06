@@ -58,24 +58,137 @@ data class Release(val version: String, val file: String, val sha256: String, va
     }
 }
 
+/** An APK to fetch: where it is and what it must turn out to be. */
+data class ApkSource(val url: String, val packageName: String, val size: Long, val sha256: String)
+
+/** How far one install has come, as the app shows it. */
+sealed interface InstallState {
+    data object Idle : InstallState
+    data class Downloading(val percent: Int) : InstallState
+    /** The system asks the user to confirm; [confirm] opens its dialog. */
+    data class Confirming(val confirm: Intent) : InstallState
+    data class Failed(val message: String) : InstallState
+}
+
+/**
+ * Streams an APK into a system installer session, checking its size and hash on the way,
+ * and follows what the installer then reports. [target] tells [InstallReceiver] which
+ * installer a report belongs to.
+ */
+class ApkInstaller(private val context: Context, private val scope: CoroutineScope, private val target: String) {
+    val state = MutableStateFlow<InstallState>(InstallState.Idle)
+
+    val busy get() = state.value is InstallState.Downloading || state.value is InstallState.Confirming
+
+    /** [silent] asks the system to skip its dialog, which it grants to an app updating itself. */
+    fun start(source: ApkSource, silent: Boolean) {
+        if (busy) return
+        state.value = InstallState.Downloading(0)
+        scope.launch {
+            runCatching { downloadAndCommit(source, silent) }.onFailure {
+                Log.w(TAG, "$target download failed: ${it.javaClass.simpleName}")
+                state.value = InstallState.Failed("내려받지 못했습니다. 인터넷 연결을 확인해 주세요.")
+            }
+        }
+    }
+
+    /** What the system installer reports for the session committed by [start]. */
+    fun onStatus(intent: Intent) {
+        when (val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                val confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java) ?: return
+                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                state.value = InstallState.Confirming(confirm)
+                // Opens while the app is on screen; otherwise the button in the app opens it.
+                runCatching { context.startActivity(confirm) }
+            }
+            PackageInstaller.STATUS_SUCCESS -> state.value = InstallState.Idle
+            else -> {
+                Log.w(TAG, "$target install failed: status $status")
+                state.value = InstallState.Failed(
+                    when (status) {
+                        PackageInstaller.STATUS_FAILURE_ABORTED -> "설치를 취소했습니다."
+                        PackageInstaller.STATUS_FAILURE_BLOCKED ->
+                            "설치가 차단되었습니다. 설정 → 보안 및 개인정보 보호 → '보안 위험 자동 차단'을 잠시 끈 뒤 다시 시도해 주세요."
+                        PackageInstaller.STATUS_FAILURE_STORAGE -> "저장 공간이 부족해 설치하지 못했습니다."
+                        else -> "설치하지 못했습니다."
+                    }
+                )
+            }
+        }
+    }
+
+    private fun downloadAndCommit(source: ApkSource, silent: Boolean) {
+        val installer = context.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+            setAppPackageName(source.packageName)
+            setSize(source.size)
+            if (silent) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+        }
+        val id = installer.createSession(params)
+        val session = installer.openSession(id)
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var total = 0L
+            val connection = open(source.url)
+            try {
+                check(connection.responseCode == 200) { "http ${connection.responseCode}" }
+                connection.inputStream.use { input ->
+                    session.openWrite("package.apk", 0, source.size).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            check(total <= source.size) { "longer than announced" }
+                            digest.update(buffer, 0, count)
+                            output.write(buffer, 0, count)
+                            state.value = InstallState.Downloading((total * 100 / source.size).toInt())
+                        }
+                        session.fsync(output)
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+            val hash = digest.digest().joinToString("") { "%02x".format(it) }
+            check(total == source.size && hash == source.sha256) { "not the announced file" }
+            val status = PendingIntent.getBroadcast(
+                context, id,
+                Intent(context, InstallReceiver::class.java).putExtra(InstallReceiver.EXTRA_TARGET, target),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            )
+            session.commit(status.intentSender)
+        } catch (e: Exception) {
+            session.abandon()
+            throw e
+        } finally {
+            session.close()
+        }
+    }
+
+    companion object {
+        private const val TAG = "Clipway"
+
+        fun open(url: String): HttpURLConnection =
+            (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 30_000
+            }
+    }
+}
+
 /**
  * Finds a newer release and hands its APK to the system installer. Looking is automatic;
  * installing starts with a tap in the app. The system only accepts an APK signed with the
  * same key as the installed app, so a forged release cannot be installed this way.
  */
 class Updater(private val context: Context, private val scope: CoroutineScope) {
-    sealed interface State {
-        data object Idle : State
-        data class Available(val release: Release) : State
-        data class Downloading(val release: Release, val percent: Int) : State
-        /** The system asks the user to confirm; [confirm] opens its dialog. */
-        data class Confirming(val release: Release, val confirm: Intent) : State
-        data class Failed(val message: String) : State
-    }
-
     enum class Check { NEWER, CURRENT, UNREACHABLE }
 
-    val state = MutableStateFlow<State>(State.Idle)
+    /** The newer release on offer, if any. */
+    val available = MutableStateFlow<Release?>(null)
+    val installer = ApkInstaller(context, scope, TARGET)
 
     private val prefs = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
     private var schedule: Job? = null
@@ -101,63 +214,30 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
     /** Asks the release server; blocks, so call it off the main thread. */
     fun checkForUpdate(): Check {
         lastCheck = SystemClock.elapsedRealtime()
-        val current = state.value
-        if (current is State.Downloading || current is State.Confirming) return Check.NEWER
+        if (installer.busy) return Check.NEWER
         val release = fetchManifest() ?: return Check.UNREACHABLE
         if (!Release.isNewer(release.version, BuildConfig.VERSION_NAME)) {
-            state.value = State.Idle
+            available.value = null
             return Check.CURRENT
         }
-        state.value = State.Available(release)
+        available.value = release
         announce(release.version)
         return Check.NEWER
     }
 
     fun install() {
-        val release = (state.value as? State.Available)?.release ?: return
-        state.value = State.Downloading(release, 0)
-        scope.launch {
-            runCatching { downloadAndCommit(release) }.onFailure {
-                Log.w(TAG, "update download failed: ${it.javaClass.simpleName}")
-                state.value = State.Failed("업데이트를 내려받지 못했습니다. 인터넷 연결을 확인해 주세요.")
-            }
-        }
-    }
-
-    /** What the system installer reports for a session committed by [install]. */
-    fun onInstallerStatus(intent: Intent) {
-        val release = when (val current = state.value) {
-            is State.Downloading -> current.release
-            is State.Confirming -> current.release
-            else -> null
-        }
-        when (val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                val confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java) ?: return
-                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (release != null) state.value = State.Confirming(release, confirm)
-                // Opens while the app is on screen; otherwise the button in the app opens it.
-                runCatching { context.startActivity(confirm) }
-            }
-            // Normally never seen: the update replaces this process.
-            PackageInstaller.STATUS_SUCCESS -> state.value = State.Idle
-            else -> {
-                Log.w(TAG, "update install failed: status $status")
-                state.value = State.Failed(
-                    when (status) {
-                        PackageInstaller.STATUS_FAILURE_ABORTED -> "설치를 취소했습니다."
-                        PackageInstaller.STATUS_FAILURE_BLOCKED ->
-                            "설치가 차단되었습니다. 설정 → 보안 및 개인정보 보호 → '보안 위험 자동 차단'을 잠시 끈 뒤 다시 시도해 주세요."
-                        PackageInstaller.STATUS_FAILURE_STORAGE -> "저장 공간이 부족해 설치하지 못했습니다."
-                        else -> "업데이트를 설치하지 못했습니다."
-                    }
-                )
-            }
-        }
+        val release = available.value ?: return
+        installer.start(
+            ApkSource(
+                "${BuildConfig.RELEASES_URL}/download/v${release.version}/${release.file}",
+                context.packageName, release.size, release.sha256,
+            ),
+            silent = true,
+        )
     }
 
     private fun fetchManifest(): Release? = runCatching {
-        val connection = open("${BuildConfig.RELEASES_URL}/latest/download/release.json")
+        val connection = ApkInstaller.open("${BuildConfig.RELEASES_URL}/latest/download/release.json")
         try {
             val bytes = if (connection.responseCode != 200) null
             else connection.inputStream.use { it.readNBytes(Release.MAX_MANIFEST_BYTES + 1) }
@@ -166,62 +246,6 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
             connection.disconnect()
         }
     }.getOrNull()
-
-    /** Streams the APK into an installer session, checking its size and hash on the way. */
-    private fun downloadAndCommit(release: Release) {
-        val installer = context.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-            setAppPackageName(context.packageName)
-            setSize(release.size)
-            // Once an update has gone through this app, later ones need no system dialog.
-            setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
-        }
-        val id = installer.createSession(params)
-        val session = installer.openSession(id)
-        try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            var total = 0L
-            val connection = open("${BuildConfig.RELEASES_URL}/download/v${release.version}/${release.file}")
-            try {
-                check(connection.responseCode == 200) { "http ${connection.responseCode}" }
-                connection.inputStream.use { input ->
-                    session.openWrite("clipway.apk", 0, release.size).use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            total += count
-                            check(total <= release.size) { "longer than announced" }
-                            digest.update(buffer, 0, count)
-                            output.write(buffer, 0, count)
-                            state.value = State.Downloading(release, (total * 100 / release.size).toInt())
-                        }
-                        session.fsync(output)
-                    }
-                }
-            } finally {
-                connection.disconnect()
-            }
-            val hash = digest.digest().joinToString("") { "%02x".format(it) }
-            check(total == release.size && hash == release.sha256) { "does not match the manifest" }
-            val status = PendingIntent.getBroadcast(
-                context, id, Intent(context, UpdateReceiver::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            session.commit(status.intentSender)
-        } catch (e: Exception) {
-            session.abandon()
-            throw e
-        } finally {
-            session.close()
-        }
-    }
-
-    private fun open(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 30_000
-        }
 
     /** One notification per version: the app is rarely opened once it is set up. */
     private fun announce(version: String) {
@@ -246,18 +270,46 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         )
     }
 
-    private companion object {
-        const val TAG = "Clipway"
-        const val CHANNEL = "updates"
-        const val NOTIFICATION_ID = 2
-        const val DAY_MS = 24 * 60 * 60 * 1000L
-        const val STALE_MS = 6 * 60 * 60 * 1000L
+    companion object {
+        const val TARGET = "update"
+        private const val CHANNEL = "updates"
+        private const val NOTIFICATION_ID = 2
+        private const val DAY_MS = 24 * 60 * 60 * 1000L
+        private const val STALE_MS = 6 * 60 * 60 * 1000L
     }
 }
 
-/** Receives the installer's progress for an update session. Only this app can send to it. */
-class UpdateReceiver : BroadcastReceiver() {
+/**
+ * Installs Shizuku for users who do not have it, from its own release page. The file is
+ * pinned by hash, so what gets installed is exactly the release that was looked at when
+ * this was written. scripts/setup-phone.sh pins the same file.
+ */
+class ShizukuInstall(context: Context, scope: CoroutineScope) {
+    val installer = ApkInstaller(context, scope, TARGET)
+
+    fun install() = installer.start(SOURCE, silent = false)
+
+    companion object {
+        const val TARGET = "shizuku"
+        const val PACKAGE = "moe.shizuku.privileged.api"
+        val SOURCE = ApkSource(
+            "https://github.com/RikkaApps/Shizuku/releases/download/v13.6.0/shizuku-v13.6.0.r1086.2650830c-release.apk",
+            PACKAGE, 2_571_773, "6e273ab0e991c4e79bc8b1bbb9b9dd739ccac1a8712a541a214078886b7b790f",
+        )
+    }
+}
+
+/** Receives the system installer's reports. Not exported: only this app's sessions reach it. */
+class InstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        (context.applicationContext as BridgeApp).updater.onInstallerStatus(intent)
+        val app = context.applicationContext as BridgeApp
+        when (intent.getStringExtra(EXTRA_TARGET)) {
+            Updater.TARGET -> app.updater.installer.onStatus(intent)
+            ShizukuInstall.TARGET -> app.shizukuInstall.installer.onStatus(intent)
+        }
+    }
+
+    companion object {
+        const val EXTRA_TARGET = "dev.mseok.clipway.target"
     }
 }
