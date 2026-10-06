@@ -10,7 +10,7 @@ struct ClipwayApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            PanelView().environmentObject(controller)
+            PanelView().environmentObject(controller).environmentObject(controller.updater)
         } label: {
             Image(systemName: controller.connected.isEmpty ? "iphone" : "iphone.radiowaves.left.and.right")
         }
@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct PanelView: View {
     @EnvironmentObject private var controller: BridgeController
+    @EnvironmentObject private var updater: Updater
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -71,7 +72,15 @@ struct PanelView: View {
             Divider()
             pairing
             Divider()
+            update
             HStack {
+                Text("버전 \(updater.currentVersion)").font(.caption).foregroundStyle(.secondary)
+                Button(updater.checking ? "확인하는 중…" : "업데이트 확인") {
+                    Task { await updater.check(userInitiated: true) }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(updater.checking || updater.phase == .installing)
                 Spacer()
                 Button("종료") { NSApp.terminate(nil) }
             }
@@ -80,6 +89,29 @@ struct PanelView: View {
         .controlSize(.small)
         .padding(14)
         .frame(width: 300)
+    }
+
+    @ViewBuilder private var update: some View {
+        switch updater.phase {
+        case .idle:
+            if updater.upToDate {
+                Text("최신 버전입니다.").font(.caption).foregroundStyle(.secondary)
+            }
+        case .available(let release):
+            HStack {
+                Text("새 버전 \(release.version)")
+                Spacer()
+                Button("업데이트") { updater.install() }
+            }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("업데이트를 설치하는 중…")
+            }
+        case .failed(let message):
+            Text(message).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     @ViewBuilder private var pairing: some View {

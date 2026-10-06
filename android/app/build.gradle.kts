@@ -14,6 +14,10 @@ val keystore = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 
+// One version for both apps, in the VERSION file at the top of the repository.
+val appVersion = rootProject.file("../VERSION").readText().trim()
+val (major, minor, patch) = appVersion.split(".").map(String::toInt)
+
 android {
     namespace = "dev.mseok.clipway"
     compileSdk = 36
@@ -22,8 +26,10 @@ android {
         applicationId = "dev.mseok.clipway"
         minSdk = 33
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = major * 1_000_000 + minor * 1_000 + patch
+        versionName = appVersion
+        buildConfigField("String", "RELEASES_URL", "\"https://github.com/mseok/clipway/releases\"")
+        manifestPlaceholders["cleartext"] = "false"
     }
 
     signingConfigs {
@@ -42,6 +48,12 @@ android {
         }
         debug {
             signingConfig = signingConfigs.getByName("local")
+            // Testing updates against a local server:
+            //   gradle assembleDebug -Pclipway.releasesUrl=http://127.0.0.1:8000  (with `adb reverse`)
+            (findProperty("clipway.releasesUrl") as String?)?.let {
+                buildConfigField("String", "RELEASES_URL", "\"$it\"")
+                manifestPlaceholders["cleartext"] = "true"
+            }
         }
     }
 

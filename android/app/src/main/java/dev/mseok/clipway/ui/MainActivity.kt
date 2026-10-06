@@ -58,13 +58,17 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.mseok.clipway.BridgeApp
 import dev.mseok.clipway.BridgeService
+import dev.mseok.clipway.BuildConfig
 import dev.mseok.clipway.ClipboardWatcher
 import dev.mseok.clipway.LinkTest
 import dev.mseok.clipway.PairingRequest
+import dev.mseok.clipway.Updater
 import dev.mseok.clipway.protocol.PairedMac
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
@@ -72,9 +76,11 @@ data class Permissions(val notifications: Boolean, val sms: Boolean, val battery
 
 class MainActivity : ComponentActivity() {
     private val bridge get() = (application as BridgeApp).bridge
+    private val updater get() = (application as BridgeApp).updater
     private val permissions = MutableStateFlow(Permissions(false, false, false))
     private val testResults = MutableStateFlow<List<LinkTest>?>(null)
     private val testing = MutableStateFlow(false)
+    private val checkingUpdate = MutableStateFlow(false)
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             refreshPermissions()
@@ -107,6 +113,7 @@ class MainActivity : ComponentActivity() {
         refreshPermissions()
         bridge.watcher.refresh()
         bridge.kick()
+        updater.checkIfStale()
     }
 
     private fun refreshPermissions() {
@@ -178,6 +185,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun checkForUpdate() {
+        checkingUpdate.value = true
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { updater.checkForUpdate() }
+            checkingUpdate.value = false
+            when (result) {
+                Updater.Check.NEWER -> Unit  // the card at the top shows it
+                Updater.Check.CURRENT -> toast("최신 버전입니다")
+                Updater.Check.UNREACHABLE -> toast("업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요")
+            }
+        }
+    }
+
     private fun openShizuku() {
         val launch = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
             ?: Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$SHIZUKU_PACKAGE"))
@@ -197,6 +217,8 @@ class MainActivity : ComponentActivity() {
         val pairing by pendingPairing.collectAsState()
         val results by testResults.collectAsState()
         val busy by testing.collectAsState()
+        val update by updater.state.collectAsState()
+        val checking by checkingUpdate.collectAsState()
 
         results?.let { list ->
             AlertDialog(
@@ -297,6 +319,25 @@ class MainActivity : ComponentActivity() {
         ) {
             Text("Clipway", style = MaterialTheme.typography.headlineSmall)
 
+            when (val current = update) {
+                Updater.State.Idle -> Unit
+                is Updater.State.Available -> Section("업데이트") {
+                    Text("새 버전 ${current.release.version}이 있습니다. (지금 ${BuildConfig.VERSION_NAME})")
+                    Button(onClick = updater::install) { Text("업데이트") }
+                }
+                is Updater.State.Downloading -> Section("업데이트") {
+                    Text("새 버전을 내려받는 중… ${current.percent}%")
+                }
+                is Updater.State.Confirming -> Section("업데이트") {
+                    Text("설치 확인 창에서 '업데이트'를 눌러 주세요.")
+                    Button(onClick = { runCatching { startActivity(current.confirm) } }) { Text("설치 확인 창 열기") }
+                }
+                is Updater.State.Failed -> Section("업데이트") {
+                    Text(current.message)
+                    OutlinedButton(onClick = ::checkForUpdate, enabled = !checking) { Text("다시 시도") }
+                }
+            }
+
             Section("Mac") {
                 if (macs.isEmpty()) Text("Mac 메뉴바의 Clipway에서 '새 폰 페어링'을 눌러 QR을 띄운 뒤 스캔하세요.")
                 macs.forEach { mac ->
@@ -366,6 +407,18 @@ class MainActivity : ComponentActivity() {
                     startActivity(
                         Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
                     )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "버전 ${BuildConfig.VERSION_NAME}",
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = ::checkForUpdate, enabled = !checking) {
+                    Text(if (checking) "확인하는 중…" else "업데이트 확인")
                 }
             }
         }

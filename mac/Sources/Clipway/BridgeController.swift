@@ -39,6 +39,7 @@ final class BridgeController: ObservableObject {
     private let listener = BridgeListener()
     private let watcher = PasteboardWatcher()
     private let otpPresenter = OTPPresenter()
+    let updater = Updater()
     /// A phone races several addresses, so it may briefly hold more than one session.
     private var sessions: [String: [PhoneSession]] = [:]
     private var pendingPsk: Data?
@@ -56,6 +57,7 @@ final class BridgeController: ObservableObject {
     private var unconfirmedPairing: String?
     private var lastTestBanner = Date.distantPast
     private var pairingSignal: DispatchSourceSignal?
+    private var updateSignal: DispatchSourceSignal?
     private var terminateSignal: DispatchSourceSignal?
     /// Last text copied on this Mac since launch.
     private var localClip: Clip?
@@ -104,6 +106,24 @@ final class BridgeController: ObservableObject {
         }
         source.resume()
         pairingSignal = source
+
+        // `pkill -USR2 Clipway` installs the newest release, likewise without the menu.
+        signal(SIGUSR2, SIG_IGN)
+        let update = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        update.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let updater = self?.updater else { return }
+                Task { await updater.installLatest() }
+            }
+        }
+        update.resume()
+        updateSignal = update
+        updater.onAvailable = { [weak self] version in
+            self?.otpPresenter.announce(
+                title: "Clipway \(version) 업데이트", detail: "메뉴바 아이콘을 눌러 설치하세요",
+                symbol: "arrow.down.circle")
+        }
+        updater.start()
 
         // `pkill` and installs send SIGTERM; quit through AppKit so sessions are closed.
         signal(SIGTERM, SIG_IGN)

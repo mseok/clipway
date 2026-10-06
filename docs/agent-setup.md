@@ -131,6 +131,14 @@ only, never clipboard contents. Mac-side log:
 Verification codes cannot be simulated; the person has to receive a real SMS. The
 Mac shows a banner at the top right and copies the code.
 
+## Updating
+
+Both apps check for a newer release once a day and tell the person. To update the Mac
+app from a script: `pkill -USR2 -x Clipway` (it downloads the newest release, verifies its
+signature, replaces `/Applications/Clipway.app` and relaunches), or re-run the install
+command from step 1. The phone app updates from its own screen ("업데이트"); the system
+asks the person to confirm the install, so do not tap that for them.
+
 ## Rules while you work
 
 - Save the Mac clipboard before testing and restore it afterwards; tests overwrite

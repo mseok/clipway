@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-swift build -c release
+swift build -c release --product Clipway
 BIN="$(swift build -c release --show-bin-path)/Clipway"
 APP="dist/Clipway.app"
 
@@ -13,6 +13,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/Clipway"
 cp Info.plist "$APP/Contents/Info.plist"
+# The version comes from the VERSION file at the top of the repository, like the APK's.
+VERSION="$(tr -d '[:space:]' < ../VERSION)"
+IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+  -c "Set :CFBundleVersion $((MAJOR * 1000000 + MINOR * 1000 + PATCH))" "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP"
 echo "built $APP"
 
