@@ -11,6 +11,7 @@ import android.content.pm.PackageInstaller
 import android.os.SystemClock
 import android.util.Log
 import dev.mseok.clipway.ui.MainActivity
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -184,7 +185,8 @@ class ApkInstaller(private val context: Context, private val scope: CoroutineSco
  * same key as the installed app, so a forged release cannot be installed this way.
  */
 class Updater(private val context: Context, private val scope: CoroutineScope) {
-    enum class Check { NEWER, CURRENT, UNREACHABLE }
+    /** [UNREACHABLE]: no connection. [UNAVAILABLE]: the server answered, but not with a release. */
+    enum class Check { NEWER, CURRENT, UNREACHABLE, UNAVAILABLE }
 
     /** The newer release on offer, if any. */
     val available = MutableStateFlow<Release?>(null)
@@ -215,7 +217,13 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
     fun checkForUpdate(): Check {
         lastCheck = SystemClock.elapsedRealtime()
         if (installer.busy) return Check.NEWER
-        val release = fetchManifest() ?: return Check.UNREACHABLE
+        val release = try {
+            fetchManifest()
+        } catch (e: IOException) {
+            return Check.UNREACHABLE
+        } catch (e: RuntimeException) {
+            null
+        } ?: return Check.UNAVAILABLE
         if (!Release.isNewer(release.version, BuildConfig.VERSION_NAME)) {
             available.value = null
             return Check.CURRENT
@@ -236,16 +244,18 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         )
     }
 
-    private fun fetchManifest(): Release? = runCatching {
+    /** Null when the server has no usable manifest; throws when it cannot be reached. */
+    @Throws(IOException::class)
+    private fun fetchManifest(): Release? {
         val connection = ApkInstaller.open("${BuildConfig.RELEASES_URL}/latest/download/release.json")
         try {
             val bytes = if (connection.responseCode != 200) null
             else connection.inputStream.use { it.readNBytes(Release.MAX_MANIFEST_BYTES + 1) }
-            bytes?.takeIf { it.size <= Release.MAX_MANIFEST_BYTES }?.let { Release.parse(String(it)) }
+            return bytes?.takeIf { it.size <= Release.MAX_MANIFEST_BYTES }?.let { Release.parse(String(it)) }
         } finally {
             connection.disconnect()
         }
-    }.getOrNull()
+    }
 
     /** One notification per version: the app is rarely opened once it is set up. */
     private fun announce(version: String) {

@@ -1,5 +1,4 @@
-<!-- The app icon's clipboard, from assets/icon.svg (same coordinates, scaled into the
-     adaptive icon's safe zone). -->
+<!-- Line version of the app icon for themed icons, which keep only the shape. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -11,14 +10,15 @@
         android:translateX="10.48"
         android:translateY="10.735">
         <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M376,292h272a64,64 0,0 1,64 64v362a64,64 0,0 1,-64 64h-272a64,64 0,0 1,-64 -64v-362a64,64 0,0 1,64 -64z" />
+            android:pathData="M380,312h264a48,48 0,0 1,48 48v354a48,48 0,0 1,-48 48h-264a48,48 0,0 1,-48 -48v-354a48,48 0,0 1,48 -48z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="40" />
         <path
-            android:fillColor="#FF27348F"
+            android:fillColor="#FFFFFFFF"
             android:pathData="M452,236h120a40,40 0,0 1,40 40v32a40,40 0,0 1,-40 40h-120a40,40 0,0 1,-40 -40v-32a40,40 0,0 1,40 -40z" />
         <path
             android:pathData="M402,492H622M566,436L622,492L566,548M622,642H402M458,586L402,642L458,698"
-            android:strokeColor="#FF3F62E6"
+            android:strokeColor="#FFFFFFFF"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
             android:strokeWidth="44" />

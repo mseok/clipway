@@ -206,6 +206,7 @@ class MainActivity : ComponentActivity() {
                 Updater.Check.NEWER -> Unit  // the card at the top shows it
                 Updater.Check.CURRENT -> toast("최신 버전입니다")
                 Updater.Check.UNREACHABLE -> toast("업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요")
+                Updater.Check.UNAVAILABLE -> toast("업데이트 정보를 받지 못했습니다. 잠시 후 다시 시도해 주세요")
             }
         }
     }
